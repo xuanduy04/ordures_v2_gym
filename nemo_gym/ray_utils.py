@@ -19,7 +19,6 @@ from time import sleep
 from typing import Dict, List, Optional
 
 import ray
-import ray.util.state
 from ray.actor import ActorClass, ActorProxy
 from ray.util.scheduling_strategies import (
     NodeAffinitySchedulingStrategy,
@@ -103,14 +102,13 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
 
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: allow gpus = {allowed_gpu_nodes}", flush=True)
 
-        head = self.cfg["ray_head_node_address"]
-        node_states = ray.util.state.list_nodes(head, detail=True, limit=10000)
-        for state in node_states:
-            assert state.node_id is not None
-            avail_num_gpus = state.resources_total.get("GPU", 0)
-            if allowed_gpu_nodes is not None and state.node_id not in allowed_gpu_nodes:
+        for node in ray.nodes():
+            node_id = node["NodeID"]
+            assert node_id is not None
+            avail_num_gpus = node.get("Resources", {}).get("GPU", 0)
+            if allowed_gpu_nodes is not None and node_id not in allowed_gpu_nodes:
                 continue
-            self.avail_gpus_dict[state.node_id] += avail_num_gpus
+            self.avail_gpus_dict[node_id] += avail_num_gpus
 
         print(f"DEBUG: _NeMoGymRayGPUSchedulingHelper: post init: avail gpus = {self.avail_gpus_dict} (intermediate)", flush=True)
 
@@ -162,12 +160,9 @@ class _NeMoGymRayGPUSchedulingHelper:  # pragma: no cover
 
 
 def lookup_ray_node_id_to_ip_dict() -> Dict[str, str]:  # pragma: no cover
-    cfg = get_global_config_dict()
-    head = cfg["ray_head_node_address"]
     id_to_ip = {}
-    node_states = ray.util.state.list_nodes(head, limit=10000)
-    for state in node_states:
-        id_to_ip[state.node_id] = state.node_ip
+    for node in ray.nodes():
+        id_to_ip[node["NodeID"]] = node["NodeManagerAddress"]
     return id_to_ip
 
 
