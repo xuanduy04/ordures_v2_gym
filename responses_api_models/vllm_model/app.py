@@ -409,9 +409,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
 
-        print(
-            f"[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} model={self.config.model} injected={body_dict.get('chat_template_kwargs')}"
-        )
+        # print(
+        #     f"[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} model={self.config.model} injected={body_dict.get('chat_template_kwargs')}"
+        # )
 
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
@@ -477,9 +477,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             create_params = self.config.extra_body | create_params
 
         try:
-            print(
-                f"[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} sending.chat_template_kwargs={create_params.get('chat_template_kwargs')} add_generation_prompt={create_params.get('add_generation_prompt')}"
-            )
+            # print(
+            #     f"[DEBUG chat_template_kwargs][gym->vllm_model] process={self.config.name} sending.chat_template_kwargs={create_params.get('chat_template_kwargs')} add_generation_prompt={create_params.get('add_generation_prompt')}"
+            # )
             chat_completion_dict = await client.create_chat_completion(**create_params)
         except ClientResponseError as e:
             """
