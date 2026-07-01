@@ -66,9 +66,14 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
 
     def _ensure_nltk_data(self):
         """Download required NLTK data at startup."""
+        import os
+
+        custom_nltk_data_path = os.environ.get("CUSTOM_NLTK_DATA_DIR")
         try:
             import nltk
 
+            if custom_nltk_data_path:
+                nltk.data.path.append(custom_nltk_data_path)
             nltk.download("punkt_tab", quiet=True)
         except ImportError:
             # ifbench not available, skip
