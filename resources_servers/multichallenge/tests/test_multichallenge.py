@@ -206,3 +206,11 @@ class TestInheritedAggregation:
         server = MultiChallengeServer.model_construct(config=cfg, server_client=mock_client)
         evaluations = self.create_evaluations([1.0, 0.5, 0.0])
         assert server._aggregate_scores(evaluations) == 0.0
+
+    def test_aggregation_mode_is_enum_not_str(self):
+        # Regression: the inherited verify() accesses self.config.aggregation_mode.value,
+        # which raises AttributeError if aggregation_mode is a plain str instead of an
+        # AggregationMode enum. Pydantic must coerce the YAML string into the enum.
+        cfg = _make_config(aggregation_mode="mean")
+        assert isinstance(cfg.aggregation_mode, AggregationMode)
+        assert cfg.aggregation_mode.value == "mean"

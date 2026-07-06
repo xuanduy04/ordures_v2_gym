@@ -36,6 +36,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import get_global_aiohttp_client
 
 from resources_servers.multichallenge_original.app import (
+    AggregationMode,
     MultiChallengeServer as _OriginalMultiChallengeServer,
     RubricEvaluation,
     _extract_verdict,
@@ -189,7 +190,9 @@ class MultiChallengeConfig(BaseResourcesServerConfig):
         description="Base parameters for judge model requests (max_output_tokens maps to max_tokens)"
     )
 
-    aggregation_mode: Any = Field(default="mean", description="How to aggregate scores from multiple rubric items")
+    aggregation_mode: AggregationMode = Field(
+        default=AggregationMode.MEAN, description="How to aggregate scores from multiple rubric items"
+    )
     judge_prompt_template: str = Field(
         default="""You are evaluating whether a model's response meets a specific criterion.
 
