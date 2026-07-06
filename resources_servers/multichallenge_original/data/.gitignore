@@ -1,5 +1,5 @@
 # Ignore all data files in this directory
-# The MultiChallenge dataset should be copied here but not committed to git.
+# The MultiChallenge dataset should be copied here but not committed to git
 
 # Ignore raw data directories
 advanced/

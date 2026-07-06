@@ -1,104 +1,195 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """
 MultiChallenge Environment Resources Server.
 
-Evaluates model responses on the MultiChallenge benchmark using an LLM judge.
-Each task contains a conversation context and a rubric of yes/no questions
-that assess the quality of the final assistant response.
+This is the production MultiChallenge server. The LLM-judge is NOT managed by
+NeMo-Gym — the YAML config must supply a ``judge_server_url`` (a bare
+``host:port``, e.g. ``0.0.0.0:8000``) pointing at an already-running baseline
+``vllm serve`` endpoint, plus a ``judge_model`` name.
 
-This environment:
-1. Loads tasks from configurable splits (e.g., "advanced", "vanilla")
-2. Feeds conversation context to the policy model
-3. Retrieves the final response (excluding thinking parts)
-4. Evaluates against each rubric entry using an LLM judge
-5. Aggregates scores using a configurable method
+The judge is queried via the OpenAI **Chat Completions** API
+(``{judge_server_url}/v1/chat/completions``) rather than the Responses API, since a
+stock ``vllm serve`` endpoint only exposes the chat-completions surface.
+
+All rubric / aggregation / verdict / request / response schema logic is
+inherited unchanged from :class:`resources_servers.multichallenge_original.app.MultiChallengeServer`.
+Any dataset that is compatible with ``multichallenge_simple_agent`` (the
+original, Gym-managed-judge variant under ``multichallenge_original/``) works
+here unchanged — the ``agent_ref.name`` is the same (``multichallenge_simple_agent``).
 """
 
 from __future__ import annotations
 
-import re
-from enum import Enum
-from typing import Any, List, Optional
+import asyncio
+import random
+from typing import Any, List
+from urllib.parse import urlparse
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+import requests
+import urllib3
+from aiohttp import ClientTimeout
+from pydantic import Field
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
-    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import get_global_aiohttp_client
+
+from resources_servers.multichallenge_original.app import (
+    MultiChallengeServer as _OriginalMultiChallengeServer,
+    RubricEvaluation,
+    _extract_verdict,
+)
+from nemo_gym.base_resources_server import BaseResourcesServerConfig
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-class AggregationMode(str, Enum):
-    """How to aggregate rubric scores into a final reward."""
-
-    # Average of all rubric scores
-    MEAN = "mean"
-    # Minimum score across all rubric items (strict)
-    MIN = "min"
-    # Maximum score across all rubric items (lenient)
-    MAX = "max"
-    # All rubric items must pass (product of binary scores)
-    ALL = "all"
-    # Any rubric item passes (max of binary scores)
-    ANY = "any"
-    # Weighted average (requires weights in rubric items)
-    WEIGHTED = "weighted"
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 67
+_WAIT_SECONDS_BEFORE_RETRY = 5
+_REQUEST_TIMEOUT_SECONDS = 600
+_MODELS_FETCH_MAX_ATTEMPTS = 6
+_MODELS_FETCH_TIMEOUT = 10
 
 
-class RubricEvaluation(BaseModel):
-    """Result of evaluating a single rubric item."""
+def _normalize_judge_server_url(judge_server_url: str) -> str:
+    """Normalize a bare ``host:port`` (or full URL) to a ``scheme://netloc`` string.
 
-    question: str
-    pass_criteria: str
-    judge_prompt: str
-    judge_response: str
-    verdict: str  # "YES" or "NO"
-    score: float  # 1.0 for pass, 0.0 for fail
-    weight: float = 1.0
+    Accepts ``0.0.0.0:8000``, ``http://0.0.0.0:8000``,
+    ``http://0.0.0.0:8000/extra/path`` (path is dropped).
+    """
+    judge_server_url = judge_server_url.strip().strip("/")
+    if not judge_server_url:
+        raise ValueError("multichallenge config requires non-empty `judge_server_url`.")
+    if "://" not in judge_server_url:
+        judge_server_url = f"http://{judge_server_url}"
+    parsed_url = urlparse(judge_server_url)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        raise ValueError(
+            "Expected `judge_server_url` like '0.0.0.0:8000' or 'http://0.0.0.0:8000'."
+        )
+    return f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+
+def _fetch_models_json_once(server_url: str) -> dict:
+    """Fetch ``/v1/models`` once with retries. Returns the parsed JSON, or a
+    ``{"status_code": [...], "text": [...]}`` failure record."""
+    responses: dict[str, list] = {"status_code": [], "text": []}
+    attempt = 0
+    while attempt < _MODELS_FETCH_MAX_ATTEMPTS:
+        attempt += 1
+        response = None
+        try:
+            response = requests.get(
+                server_url,
+                headers={"Accept": "application/json", "Connection": "close"},
+                timeout=_MODELS_FETCH_TIMEOUT,
+                stream=False,
+                verify=False,
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Querying '{server_url}', attempt {attempt}/{_MODELS_FETCH_MAX_ATTEMPTS}: {type(e).__name__}: {e}")
+        finally:
+            responses["status_code"].append(response.status_code if response is not None else None)
+            responses["text"].append(response.text if response is not None else None)
+            if response is not None:
+                response.close()
+    return responses
+
+
+def _messages_to_chat_format(messages: List[NeMoGymEasyInputMessage]) -> list[dict[str, Any]]:
+    """Convert NeMo-Gym easy input messages into OpenAI chat-completions ``messages``."""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        content = m.content
+        if isinstance(content, str):
+            c = content
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    # Input text parts use type="input_text" (Responses API);
+                    # be robust and key on the presence of a "text" field.
+                    if "text" in part:
+                        parts.append(str(part.get("text", "")))
+                    elif "content" in part:
+                        parts.append(str(part["content"]))
+                else:
+                    parts.append(str(part))
+            c = "".join(parts)
+        else:
+            c = str(content)
+        out.append({"role": m.role, "content": c})
+    return out
+
+
+def _build_chat_completions_payload(
+    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
+    messages: List[NeMoGymEasyInputMessage],
+    judge_model: str,
+) -> dict[str, Any]:
+    """Build the JSON body for a ``/v1/chat/completions`` judge request.
+
+    ``max_output_tokens`` (Responses-API naming) is mapped to ``max_tokens``.
+    """
+    payload: dict[str, Any] = {
+        "model": judge_model,
+        "messages": _messages_to_chat_format(messages),
+        "stream": False,
+    }
+    if judge_responses_create_params.temperature is not None:
+        payload["temperature"] = judge_responses_create_params.temperature
+    if judge_responses_create_params.top_p is not None:
+        payload["top_p"] = judge_responses_create_params.top_p
+    if judge_responses_create_params.max_output_tokens is not None:
+        payload["max_tokens"] = judge_responses_create_params.max_output_tokens
+    return payload
+
+
+def _extract_chat_completion_text(response_json: dict[str, Any]) -> str:
+    """Extract the judge output text from a chat-completions response JSON."""
+    choices = response_json.get("choices", [])
+    if not choices:
+        return ""
+    first_choice = choices[0]
+    message = first_choice.get("message", {})
+    content = message.get("content", "")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif "content" in item:
+                    parts.append(str(item["content"]))
+            else:
+                parts.append(str(item))
+        return "".join(parts).strip()
+    return str(content).strip()
 
 
 class MultiChallengeConfig(BaseResourcesServerConfig):
-    """Configuration for the MultiChallenge environment server."""
+    """Configuration for the MultiChallenge environment server.
+
+    The LLM-judge is hosted externally (not managed by NeMo-Gym). Both
+    ``judge_server_url`` and ``judge_model`` are mandated (no defaults).
+    """
 
     name: str = "multichallenge"
 
-    # Reference to the judge model server
-    judge_model_server: ModelServerRef = Field(description="Reference to the model server used as the LLM judge")
+    # Bare host:port (or full URL) of an already-running vLLM endpoint.
+    judge_server_url: str = Field(description="host:port of the externally-hosted LLM judge (e.g. 0.0.0.0:8000)")
+    # Model name served at judge_server_url; validated against /v1/models at startup.
+    judge_model: str = Field(description="Model name served at judge_server_url; sent as `model` in the judge payload")
 
-    # Parameters for judge requests
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
-        description="Base parameters for judge model requests"
+        description="Base parameters for judge model requests (max_output_tokens maps to max_tokens)"
     )
 
-    # Aggregation mode for combining rubric scores
-    aggregation_mode: AggregationMode = Field(
-        default=AggregationMode.MEAN, description="How to aggregate scores from multiple rubric items"
-    )
-
-    # Template for the judge prompt
+    aggregation_mode: Any = Field(default="mean", description="How to aggregate scores from multiple rubric items")
     judge_prompt_template: str = Field(
         default="""You are evaluating whether a model's response meets a specific criterion.
 
@@ -117,223 +208,119 @@ Does the model's response satisfy the criterion described in the evaluation ques
 Analyze carefully, then respond with exactly [[YES]] or [[NO]] on the last line.""",
         description="Template for the judge evaluation prompt",
     )
-
-    # System message for the judge
-    judge_system_message: Optional[str] = Field(
+    judge_system_message: str | None = Field(
         default="You are a precise evaluator. Assess responses objectively based on the given criteria.",
         description="Optional system message for the judge",
     )
-
-    # Whether to run rubric evaluations in parallel
     parallel_evaluation: bool = Field(default=True, description="Whether to evaluate rubric items in parallel")
-
-    # Labels for verdict extraction
     yes_label: str = Field(default="[[YES]]", description="Label indicating YES verdict")
     no_label: str = Field(default="[[NO]]", description="Label indicating NO verdict")
 
 
-class MultiChallengeRunRequest(BaseRunRequest):
-    """Run request payload for MultiChallenge tasks."""
+class MultiChallengeServer(_OriginalMultiChallengeServer):
+    """MultiChallenge server that uses an externally-hosted LLM judge.
 
-    model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    task_id: Optional[int] = None
-    rubric: Optional[List[dict]] = None
-    context: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
-
-
-class MultiChallengeVerifyRequest(MultiChallengeRunRequest, BaseVerifyRequest):
-    """Verify request that includes the model's response."""
-
-    pass
-
-
-class MultiChallengeVerifyResponse(BaseVerifyResponse):
-    """Response with detailed rubric evaluations."""
-
-    model_config = ConfigDict(extra="allow")
-
-    context: str
-    generated_response: str
-    rubric_evaluations: List[RubricEvaluation]
-    aggregation_mode: str
-    num_passed: int
-    num_total: int
-
-
-def _extract_text_from_response(response: NeMoGymResponse, exclude_thinking: bool = True) -> str:
-    """Extract text content from the last assistant message, optionally excluding thinking."""
-    for output in reversed(response.output):
-        if getattr(output, "type", None) == "message" and getattr(output, "role", None) == "assistant":
-            content = getattr(output, "content", None)
-            if isinstance(content, list):
-                texts = []
-                for c in content:
-                    text = getattr(c, "text", None)
-                    if isinstance(text, str):
-                        texts.append(text)
-                full_text = "\n".join(texts).strip()
-            elif isinstance(content, str):
-                full_text = content.strip()
-            else:
-                continue
-
-            if exclude_thinking:
-                # Remove <think>...</think> blocks
-                full_text = re.sub(r"<think>.*?</think>", "", full_text, flags=re.DOTALL)
-                # Also remove <thinking>...</thinking> blocks
-                full_text = re.sub(r"<thinking>.*?</thinking>", "", full_text, flags=re.DOTALL)
-                # Fallback: the opening <think>/<thinking> tag may have been part of
-                # the prompt template rather than the model's generation, so
-                # generated_response starts with CoT reasoning followed by </think>
-                # without a matching opening tag. Strip everything up to and
-                # including the unpaired closing tag.
-                full_text = re.sub(r"^.*?</think>", "", full_text, flags=re.DOTALL)
-                full_text = re.sub(r"^.*?</thinking>", "", full_text, flags=re.DOTALL)
-
-            return full_text.strip()
-    return ""
-
-
-def _build_context_from_messages(messages: List[dict], exclude_thinking: bool = True) -> str:
-    """Build a readable context string from the message history."""
-    context_parts = []
-    for msg in messages:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-
-        # Skip thinking messages
-        if exclude_thinking and role == "thinking":
-            continue
-
-        role_label = role.upper()
-        context_parts.append(f"[{role_label}]: {content}")
-
-    return "\n\n".join(context_parts)
-
-
-def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
-    """Extract YES/NO verdict from judge response."""
-    # Look for the labels in the response
-    yes_pos = response_text.rfind(yes_label)
-    no_pos = response_text.rfind(no_label)
-
-    if yes_pos < 0 and no_pos < 0:
-        # Fallback: look for plain YES/NO at end of response
-        lines = response_text.strip().split("\n")
-        last_line = lines[-1].strip().upper() if lines else ""
-        if "YES" in last_line:
-            return "YES"
-        elif "NO" in last_line:
-            return "NO"
-        return "NO"  # Default to NO if unclear
-    # Return whichever appears last (most authoritative)
-    if yes_pos > no_pos:
-        return "YES"
-    return "NO"
-
-
-class MultiChallengeServer(SimpleResourcesServer):
-    """MultiChallenge evaluation server."""
+    Inherits all rubric / aggregation / verdict / verify logic from
+    :class:`resources_servers.multichallenge_original.app.MultiChallengeServer`,
+    overriding only the judge-call path to POST directly to
+    ``{judge_server_url}/v1/chat/completions``.
+    """
 
     config: MultiChallengeConfig
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        return app
+    # Derived in setup_webserver() from config.judge_server_url; not a YAML field.
+    _judge_chat_completions_url: str = ""
 
-    async def verify(self, body: MultiChallengeVerifyRequest) -> MultiChallengeVerifyResponse:
-        """Verify model response against the rubric using LLM judge."""
+    def setup_webserver(self):
+        normalized = _normalize_judge_server_url(self.config.judge_server_url)
+        self._judge_chat_completions_url = f"{normalized}/v1/chat/completions"
 
-        # Extract the generated response (without thinking)
-        generated_response = _extract_text_from_response(body.response, exclude_thinking=True)
-
-        # Get context from the request or build from messages if available
-        context = body.context or ""
-        if not context and body.metadata and "messages" in body.metadata:
-            context = _build_context_from_messages(body.metadata["messages"])
-        # Get rubric from request
-        rubric = body.rubric or []
-        if not rubric and body.metadata and "rubric" in body.metadata:
-            rubric = body.metadata["rubric"]
-
-        # Evaluate each rubric item
-        if self.config.parallel_evaluation and len(rubric) > 1:
-            import asyncio
-
-            evaluations = await asyncio.gather(
-                *[self._evaluate_rubric_item(item, context, generated_response) for item in rubric]
+        models_url = f"{normalized}/v1/models"
+        models_response = _fetch_models_json_once(models_url)
+        if "status_code" in models_response:
+            raise ValueError(
+                f"Could not query '{models_url}'. Query attempt(s) returned: {models_response}"
             )
-        else:
-            evaluations = []
-            for item in rubric:
-                eval_result = await self._evaluate_rubric_item(item, context, generated_response)
-                evaluations.append(eval_result)
-
-        # Aggregate scores
-        reward = self._aggregate_scores(evaluations)
-        num_passed = sum(1 for e in evaluations if e.score >= 0.99)
-
-        # Build response
-        payload = body.model_dump()
-        payload.pop("context", None)
-        payload.pop("rubric", None)
-        return MultiChallengeVerifyResponse(
-            **payload,
-            reward=reward,
-            context=context,
-            generated_response=generated_response,
-            rubric_evaluations=evaluations,
-            aggregation_mode=self.config.aggregation_mode.value,
-            num_passed=num_passed,
-            num_total=len(evaluations),
+        available_models = [model.get("id", "") for model in models_response.get("data", [])]
+        if self.config.judge_model not in available_models:
+            raise ValueError(
+                f"Judge model '{self.config.judge_model}' NOT found on server '{normalized}'. "
+                f"Available models: {available_models}"
+            )
+        print(
+            f"multichallenge: judge_server_url='{normalized}', judge_model='{self.config.judge_model}' "
+            f"validated against /v1/models ({len(available_models)} model(s) available)."
         )
+        return super().setup_webserver()
+
+    async def _post_chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST a chat-completions request to the external judge with retry on 429/5xx."""
+        client = get_global_aiohttp_client()
+        url = self._judge_chat_completions_url
+        timeout = ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
+        headers = {"Content-Type": "application/json"}
+        attempt = 0
+        while attempt < _MAX_RETRIES:
+            attempt += 1
+            try:
+                async with client.post(url, json=payload, headers=headers, timeout=timeout) as response:
+                    if response.status in _RETRYABLE_STATUS_CODES:
+                        body = await response.text()
+                        print(
+                            f"[WARNING] multichallenge at attempt={attempt}: judge request "
+                            f"returned status code ({response.status}) with body ({body[:300]}); "
+                            f"retrying in {_WAIT_SECONDS_BEFORE_RETRY} second(s)..."
+                        )
+                        await asyncio.sleep(_WAIT_SECONDS_BEFORE_RETRY + random.uniform(0, 1))
+                        continue
+                    if response.status >= 400:
+                        body = await response.text()
+                        raise ValueError(
+                            f"judge request failed with non-retryable status {response.status}: {body[:500]}"
+                        )
+                    return await response.json()
+            except Exception as exc:
+                print(
+                    f"[WARNING] multichallenge at attempt={attempt}: judge request failed "
+                    f"with error ({exc}); retrying in {_WAIT_SECONDS_BEFORE_RETRY} second(s)..."
+                )
+                await asyncio.sleep(_WAIT_SECONDS_BEFORE_RETRY + random.uniform(0, 1))
+        print(
+            f"[WARNING] multichallenge at attempt={attempt}: Maximum retries reached; "
+            "returning empty judge response (verdict will default to NO / score 0.0)."
+        )
+        return {}
 
     async def _evaluate_rubric_item(self, item: dict, context: str, response: str) -> RubricEvaluation:
-        """Evaluate a single rubric item using the LLM judge."""
-
+        """Evaluate a single rubric item using the externally-hosted LLM judge."""
         question = item.get("question", "")
         pass_criteria = item.get("pass_criteria", "YES")
         weight = item.get("weight", 1.0)
 
-        # Format the judge prompt
         judge_prompt = self.config.judge_prompt_template.format(
             context=context,
             response=response,
             question=question,
             pass_criteria=pass_criteria,
         )
-        # Build messages for judge
         msgs: List[NeMoGymEasyInputMessage] = []
         if self.config.judge_system_message:
             msgs.append(NeMoGymEasyInputMessage(role="system", content=self.config.judge_system_message))
         msgs.append(NeMoGymEasyInputMessage(role="user", content=judge_prompt))
 
-        # Create request parameters
-        request_params = self.config.judge_responses_create_params.model_copy(deep=True)
-        request_params.input = msgs
-
-        # Call judge model
-        response_obj = await self.server_client.post(
-            server_name=self.config.judge_model_server.name,
-            url_path="/v1/responses",
-            json=request_params,
+        payload = _build_chat_completions_payload(
+            self.config.judge_responses_create_params, msgs, self.config.judge_model
         )
-        judge_response = NeMoGymResponse.model_validate(await response_obj.json())
-        judge_text = _extract_text_from_response(judge_response, exclude_thinking=True)
+        response_json = await self._post_chat_completions(payload)
+        judge_text = _extract_chat_completion_text(response_json)
 
-        # Extract verdict
         verdict = _extract_verdict(judge_text, self.config.yes_label, self.config.no_label)
 
-        # Score based on whether verdict matches expected criteria
         if pass_criteria.upper() == "YES":
             score = 1.0 if verdict == "YES" else 0.0
         elif pass_criteria.upper() == "NO":
             score = 1.0 if verdict == "NO" else 0.0
         else:
-            # For other criteria, treat YES as success
             score = 1.0 if verdict == "YES" else 0.0
         return RubricEvaluation(
             question=question,
@@ -344,39 +331,6 @@ class MultiChallengeServer(SimpleResourcesServer):
             score=score,
             weight=weight,
         )
-
-    def _aggregate_scores(self, evaluations: List[RubricEvaluation]) -> float:
-        """Aggregate rubric scores into final reward."""
-        if not evaluations:
-            return 0.0
-
-        scores = [e.score for e in evaluations]
-        weights = [e.weight for e in evaluations]
-
-        mode = self.config.aggregation_mode
-
-        if mode == AggregationMode.MEAN:
-            return sum(scores) / len(scores)
-
-        elif mode == AggregationMode.MIN:
-            return min(scores)
-
-        elif mode == AggregationMode.MAX:
-            return max(scores)
-
-        elif mode == AggregationMode.ALL:
-            return 1.0 if all(s >= 0.99 for s in scores) else 0.0
-
-        elif mode == AggregationMode.ANY:
-            return 1.0 if any(s >= 0.99 for s in scores) else 0.0
-
-        elif mode == AggregationMode.WEIGHTED:
-            total_weight = sum(weights)
-            if total_weight == 0:
-                return 0.0
-            weighted_sum = sum(s * w for s, w in zip(scores, weights))
-            return weighted_sum / total_weight
-        return 0.0
 
 
 if __name__ == "__main__":

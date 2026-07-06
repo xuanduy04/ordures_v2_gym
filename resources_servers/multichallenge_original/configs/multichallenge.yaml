@@ -1,16 +1,15 @@
 # ============================================================================
 # MultiChallenge Environment Configuration
 # ============================================================================
-# The LLM-judge is NOT managed by NeMo-Gym. The YAML MUST supply:
-#   - judge_server_url : host:port of an already-running `vllm serve` endpoint
-#                  (e.g. 0.0.0.0:8000). No default is provided.
-#   - judge_model: model name served at judge_server_url (validated against
-#                  /v1/models at startup and sent as `model` in the judge payload).
+# This config defines the MultiChallenge environment and LLM judge setup.
 #
-# The judge is queried via {judge_server_url}/v1/chat/completions (native vLLM),
-# NOT the Responses API. All rubric / aggregation / verdict / data-schema logic
-# is inherited from `multichallenge_original`, so any dataset compatible with
-# `multichallenge_simple_agent` works unchanged.
+# LLM Judge Configuration:
+#   By default, the judge uses the same vLLM server as the policy model.
+#   This is efficient as no additional GPU resources are needed. In practice,
+#   we typically use a separate judge model server with a different model.
+#
+#   To use a separate judge endpoint, uncomment the judge_model section below
+#   and change judge_model_server.name to "judge_model".
 # ============================================================================
 
 # ============================================================================
@@ -21,16 +20,14 @@ multichallenge:
     multichallenge:
       entrypoint: app.py
 
-      # MANDATED: externally-hosted LLM-judge endpoint (no default).
-      judge_server_url: ""
-      # MANDATED: model name served at judge_server_url (no default).
-      judge_model: ""
+      # Judge model reference - uses the same vLLM server as the policy model.
+      # This means generation and judging share the same model instance.
+      # To use a separate judge, change 'name' to 'judge_model' and configure below.
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
 
-      # Parameters for judge requests.
-      # `max_output_tokens` is mapped to `max_tokens` in the chat-completions payload.
-      # NOTE: temperature and top_p must match policy.generation settings in the
-      # grpo config because NeMo-RL enforces consistent sampling params for
-      # on-policy inference.
+      # Parameters for judge requests
       judge_responses_create_params:
         input: []
         max_output_tokens: 8192
@@ -69,7 +66,7 @@ multichallenge:
       no_label: "[[NO]]"
 
       domain: knowledge
-      description: "MultiChallenge benchmark evaluation with an externally-hosted LLM judge"
+      description: "MultiChallenge benchmark evaluation with LLM judge"
       verified: false
 
 # ============================================================================
@@ -98,4 +95,27 @@ multichallenge_simple_agent:
           type: train
           license: "TBD"
           jsonl_fpath: resources_servers/multichallenge/data/vanilla.jsonl
-      verified: false
+
+# ============================================================================
+# Judge Model Server Configuration (Optional)
+# ============================================================================
+# By default, the judge uses 'policy_model' (configured above).
+# This means the same vLLM server handles both generation and judging.
+#
+# If you want a SEPARATE judge model, uncomment ONE of the options below
+# and change judge_model_server.name from 'policy_model' to 'judge_model'.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# OPTION: External OpenAI-compatible API for Judge
+# ----------------------------------------------------------------------------
+# Use this to connect to an external endpoint (NVIDIA NIM, OpenAI, etc.)
+# Configure credentials in env.yaml or via command-line overrides.
+#
+# judge_model:
+#   responses_api_models:
+#     openai_model:
+#       entrypoint: app.py
+#       openai_base_url: ${judge_base_url}
+#       openai_api_key: ${judge_api_key}
+#       openai_model: ${judge_model_name}
