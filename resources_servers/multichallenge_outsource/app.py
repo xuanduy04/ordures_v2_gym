@@ -3,11 +3,11 @@ MultiChallenge Outsource Environment Resources Server.
 
 This is identical to ``resources_servers.multichallenge`` except that the
 LLM-judge is NOT managed by NeMo-Gym. Instead, the YAML config must supply a
-``judge_link`` (a bare ``host:port``, e.g. ``0.0.0.0:8000``) pointing at an
+``judge_server_url`` (a bare ``host:port``, e.g. ``0.0.0.0:8000``) pointing at an
 already-running baseline ``vllm serve`` endpoint, plus a ``judge_model`` name.
 
 The judge is queried via the OpenAI **Chat Completions** API
-(``{judge_link}/v1/chat/completions``) rather than the Responses API, since a
+(``{judge_server_url}/v1/chat/completions``) rather than the Responses API, since a
 stock ``vllm serve`` endpoint only exposes the chat-completions surface.
 
 All rubric / aggregation / verdict / request / response schema logic is
@@ -52,21 +52,21 @@ _MODELS_FETCH_MAX_ATTEMPTS = 6
 _MODELS_FETCH_TIMEOUT = 10
 
 
-def _normalize_judge_link(judge_link: str) -> str:
+def _normalize_judge_server_url(judge_server_url: str) -> str:
     """Normalize a bare ``host:port`` (or full URL) to a ``scheme://netloc`` string.
 
     Accepts ``0.0.0.0:8000``, ``http://0.0.0.0:8000``,
     ``http://0.0.0.0:8000/extra/path`` (path is dropped).
     """
-    judge_link = judge_link.strip().strip("/")
-    if not judge_link:
-        raise ValueError("multichallenge_outsource config requires non-empty `judge_link`.")
-    if "://" not in judge_link:
-        judge_link = f"http://{judge_link}"
-    parsed_url = urlparse(judge_link)
+    judge_server_url = judge_server_url.strip().strip("/")
+    if not judge_server_url:
+        raise ValueError("multichallenge_outsource config requires non-empty `judge_server_url`.")
+    if "://" not in judge_server_url:
+        judge_server_url = f"http://{judge_server_url}"
+    parsed_url = urlparse(judge_server_url)
     if not parsed_url.scheme or not parsed_url.netloc:
         raise ValueError(
-            "Expected `judge_link` like '0.0.0.0:8000' or 'http://0.0.0.0:8000'."
+            "Expected `judge_server_url` like '0.0.0.0:8000' or 'http://0.0.0.0:8000'."
         )
     return f"{parsed_url.scheme}://{parsed_url.netloc}"
 
@@ -175,15 +175,15 @@ class MultiChallengeOutsourceConfig(BaseResourcesServerConfig):
     """Configuration for the MultiChallenge outsource environment server.
 
     The LLM-judge is hosted externally (not managed by NeMo-Gym). Both
-    ``judge_link`` and ``judge_model`` are mandated (no defaults).
+    ``judge_server_url`` and ``judge_model`` are mandated (no defaults).
     """
 
     name: str = "multichallenge_outsource"
 
     # Bare host:port (or full URL) of an already-running vLLM endpoint.
-    judge_link: str = Field(description="host:port of the externally-hosted LLM judge (e.g. 0.0.0.0:8000)")
-    # Model name served at judge_link; validated against /v1/models at startup.
-    judge_model: str = Field(description="Model name served at judge_link; sent as `model` in the judge payload")
+    judge_server_url: str = Field(description="host:port of the externally-hosted LLM judge (e.g. 0.0.0.0:8000)")
+    # Model name served at judge_server_url; validated against /v1/models at startup.
+    judge_model: str = Field(description="Model name served at judge_server_url; sent as `model` in the judge payload")
 
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
         description="Base parameters for judge model requests (max_output_tokens maps to max_tokens)"
@@ -222,11 +222,11 @@ class MultiChallengeOutsourceServer(MultiChallengeServer):
 
     config: MultiChallengeOutsourceConfig
 
-    # Derived in setup_webserver() from config.judge_link; not a YAML field.
+    # Derived in setup_webserver() from config.judge_server_url; not a YAML field.
     _judge_chat_completions_url: str = ""
 
     def setup_webserver(self):
-        normalized = _normalize_judge_link(self.config.judge_link)
+        normalized = _normalize_judge_server_url(self.config.judge_server_url)
         self._judge_chat_completions_url = f"{normalized}/v1/chat/completions"
 
         models_url = f"{normalized}/v1/models"
@@ -242,7 +242,7 @@ class MultiChallengeOutsourceServer(MultiChallengeServer):
                 f"Available models: {available_models}"
             )
         print(
-            f"multichallenge_outsource: judge_link='{normalized}', judge_model='{self.config.judge_model}' "
+            f"multichallenge_outsource: judge_server_url='{normalized}', judge_model='{self.config.judge_model}' "
             f"validated against /v1/models ({len(available_models)} model(s) available)."
         )
         return super().setup_webserver()

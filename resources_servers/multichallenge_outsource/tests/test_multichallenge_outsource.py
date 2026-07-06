@@ -24,7 +24,7 @@ from resources_servers.multichallenge_outsource.app import (
     _build_chat_completions_payload,
     _extract_chat_completion_text,
     _messages_to_chat_format,
-    _normalize_judge_link,
+    _normalize_judge_server_url,
 )
 
 
@@ -34,7 +34,7 @@ def _make_config(**overrides):
         port=0,
         entrypoint="",
         name="test",
-        judge_link="0.0.0.0:8000",
+        judge_server_url="0.0.0.0:8000",
         judge_model="test-model",
         judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
     )
@@ -44,27 +44,27 @@ def _make_config(**overrides):
 
 class TestNormalizeJudgeLink:
     def test_bare_host_port(self):
-        assert _normalize_judge_link("0.0.0.0:8000") == "http://0.0.0.0:8000"
+        assert _normalize_judge_server_url("0.0.0.0:8000") == "http://0.0.0.0:8000"
 
     def test_full_url(self):
-        assert _normalize_judge_link("http://0.0.0.0:8000") == "http://0.0.0.0:8000"
+        assert _normalize_judge_server_url("http://0.0.0.0:8000") == "http://0.0.0.0:8000"
 
     def test_drops_path(self):
-        assert _normalize_judge_link("http://0.0.0.0:8000/extra/stuff/behind") == "http://0.0.0.0:8000"
+        assert _normalize_judge_server_url("http://0.0.0.0:8000/extra/stuff/behind") == "http://0.0.0.0:8000"
 
     def test_https(self):
-        assert _normalize_judge_link("https://judge.example.com:8443") == "https://judge.example.com:8443"
+        assert _normalize_judge_server_url("https://judge.example.com:8443") == "https://judge.example.com:8443"
 
     def test_strips_whitespace_and_slashes(self):
-        assert _normalize_judge_link("  0.0.0.0:8000/  ") == "http://0.0.0.0:8000"
+        assert _normalize_judge_server_url("  0.0.0.0:8000/  ") == "http://0.0.0.0:8000"
 
     def test_empty_raises(self):
         with pytest.raises(ValueError):
-            _normalize_judge_link("")
+            _normalize_judge_server_url("")
 
     def test_whitespace_only_raises(self):
         with pytest.raises(ValueError):
-            _normalize_judge_link("   ")
+            _normalize_judge_server_url("   ")
 
 
 class TestMessagesToChatFormat:
@@ -132,9 +132,9 @@ class TestExtractChatCompletionText:
 
 
 class TestConfigRequiredFields:
-    def test_missing_judge_link_raises(self):
+    def test_missing_judge_server_url_raises(self):
         with pytest.raises(Exception):
-            _make_config(judge_link=None)
+            _make_config(judge_server_url=None)
 
     def test_missing_judge_model_raises(self):
         with pytest.raises(Exception):
@@ -146,7 +146,7 @@ class TestConfigRequiredFields:
 
     def test_valid_config(self):
         cfg = _make_config()
-        assert cfg.judge_link == "0.0.0.0:8000"
+        assert cfg.judge_server_url == "0.0.0.0:8000"
         assert cfg.judge_model == "test-model"
 
     def test_default_name(self):
@@ -154,7 +154,7 @@ class TestConfigRequiredFields:
             host="",
             port=0,
             entrypoint="",
-            judge_link="0.0.0.0:8000",
+            judge_server_url="0.0.0.0:8000",
             judge_model="m",
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )

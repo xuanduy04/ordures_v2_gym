@@ -18,7 +18,7 @@ sed 's/multichallenge_simple_agent/multichallenge_simple_agent_outsource/g' \
 ```
 
 No other field needs to change (assuming valid YAML config settings for
-`judge_model` and `judge_link`).
+`judge_model` and `judge_server_url`).
 
 ## Files
 

@@ -3,12 +3,12 @@
 # ============================================================================
 # Identical to `multichallenge.yaml` except the LLM-judge is NOT managed by
 # NeMo-Gym. The YAML MUST supply:
-#   - judge_link : host:port of an already-running `vllm serve` endpoint
+#   - judge_server_url : host:port of an already-running `vllm serve` endpoint
 #                  (e.g. 0.0.0.0:8000). No default is provided.
-#   - judge_model: model name served at judge_link (validated against /v1/models
+#   - judge_model: model name served at judge_server_url (validated against /v1/models
 #                  at startup and sent as `model` in the judge payload).
 #
-# The judge is queried via {judge_link}/v1/chat/completions (native vLLM), NOT
+# The judge is queried via {judge_server_url}/v1/chat/completions (native vLLM), NOT
 # the Responses API. All rubric / aggregation / verdict / data-schema logic is
 # unchanged from `multichallenge`, so any dataset compatible with
 # `multichallenge_simple_agent` only needs its `agent_ref.name` changed to
@@ -24,8 +24,8 @@ multichallenge_outsource:
       entrypoint: app.py
 
       # MANDATED: externally-hosted LLM-judge endpoint (no default).
-      judge_link: ""
-      # MANDATED: model name served at judge_link (no default).
+      judge_server_url: ""
+      # MANDATED: model name served at judge_server_url (no default).
       judge_model: ""
 
       # Parameters for judge requests.
