@@ -1,0 +1,103 @@
+# ============================================================================
+# MultiChallenge Outsource Environment Configuration
+# ============================================================================
+# Identical to `multichallenge.yaml` except the LLM-judge is NOT managed by
+# NeMo-Gym. The YAML MUST supply:
+#   - judge_link : host:port of an already-running `vllm serve` endpoint
+#                  (e.g. 0.0.0.0:8000). No default is provided.
+#   - judge_model: model name served at judge_link (validated against /v1/models
+#                  at startup and sent as `model` in the judge payload).
+#
+# The judge is queried via {judge_link}/v1/chat/completions (native vLLM), NOT
+# the Responses API. All rubric / aggregation / verdict / data-schema logic is
+# unchanged from `multichallenge`, so any dataset compatible with
+# `multichallenge_simple_agent` only needs its `agent_ref.name` changed to
+# `multichallenge_simple_agent_outsource`.
+# ============================================================================
+
+# ============================================================================
+# MultiChallenge Outsource Resources Server
+# ============================================================================
+multichallenge_outsource:
+  resources_servers:
+    multichallenge_outsource:
+      entrypoint: app.py
+
+      # MANDATED: externally-hosted LLM-judge endpoint (no default).
+      judge_link: ""
+      # MANDATED: model name served at judge_link (no default).
+      judge_model: ""
+
+      # Parameters for judge requests.
+      # `max_output_tokens` is mapped to `max_tokens` in the chat-completions payload.
+      # NOTE: temperature and top_p must match policy.generation settings in the
+      # grpo config because NeMo-RL enforces consistent sampling params for
+      # on-policy inference.
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        temperature: 0.7
+        top_p: 0.8
+
+      # Aggregation mode for rubric scores: mean | min | max | all | any | weighted
+      aggregation_mode: mean
+      parallel_evaluation: true
+
+      # Judge system message
+      judge_system_message: >-
+        You are a precise evaluator. Assess responses objectively based on the given criteria.
+        Analyze the response carefully against the evaluation question.
+
+      # Judge prompt template with placeholders
+      judge_prompt_template: |-
+        You are evaluating whether a model's response meets a specific criterion.
+
+        CONVERSATION CONTEXT:
+        {context}
+
+        MODEL'S FINAL RESPONSE:
+        {response}
+
+        EVALUATION QUESTION:
+        {question}
+
+        EXPECTED ANSWER: {pass_criteria}
+
+        Does the model's response satisfy the criterion described in the evaluation question?
+        Think step by step, then respond with exactly [[YES]] or [[NO]] on the last line.
+
+      # Verdict labels
+      yes_label: "[[YES]]"
+      no_label: "[[NO]]"
+
+      domain: knowledge
+      description: "MultiChallenge benchmark evaluation with an outsourced LLM judge"
+      verified: false
+
+# ============================================================================
+# MultiChallenge Outsource Agent Configuration
+# ============================================================================
+multichallenge_simple_agent_outsource:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: multichallenge_outsource
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: multichallenge_outsource_example
+          type: example
+          license: "Apache 2.0"
+          jsonl_fpath: resources_servers/multichallenge_outsource/data/example.jsonl
+        - name: multichallenge_outsource_advanced
+          type: train
+          license: "TBD"
+          jsonl_fpath: resources_servers/multichallenge_outsource/data/advanced.jsonl
+        - name: multichallenge_outsource_vanilla
+          type: train
+          license: "TBD"
+          jsonl_fpath: resources_servers/multichallenge_outsource/data/vanilla.jsonl
+      verified: false
