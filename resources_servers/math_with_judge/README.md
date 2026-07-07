@@ -1,56 +1,116 @@
-# Description
-This is a resource server for verifying the correctness of answers to mathematical problems.  It uses a combination of the Hugging Face Math-Verify library and an LLM as a judge.
+# Math With Judge Environment
 
-The problems in the OpenMathReasoning dataset are taken from the
-[OpenMathReasoning dataset](https://huggingface.co/datasets/nvidia/Nemotron-RL-math-OpenMathReasoning)
-on Hugging Face.
+Evaluates model responses on math problems using the Hugging Face **Math-Verify**
+library and an LLM judge whose hosting is **not managed by NeMo-Gym**. The YAML
+config supplies a `judge_server_url` (`host:port` of an already-running
+`vllm serve` endpoint) and a `judge_model` name. The judge is queried via the
+OpenAI **Chat Completions** API (`{judge_server_url}/v1/chat/completions`),
+which is the surface a stock `vllm serve` exposes.
 
+All math-verify / verdict / data-schema logic is inherited unchanged from
+[`resources_servers/math_with_judge_original`](../math_with_judge_original),
+which is the original Gym-managed-judge variant.
 
-# Example usage
+## How it differs from `math_with_judge_original`
 
-## Running servers
-The following are example commands for running this resource server, along with the simple agent and an OpenAI model:
-```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
-resources_servers/math_with_judge/configs/math_with_judge.yaml"
-ng_run "+config_paths=[$config_paths]" \
-    +math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model
+| Aspect | `math_with_judge_original` | `math_with_judge` (this) |
+|--------|----------------------------|--------------------------|
+| Judge hosting | NeMo-Gym manages a `responses_api_models` vLLM server | Externally hosted; YAML supplies `judge_server_url` |
+| Judge protocol | `/v1/responses` (Responses API) via `ServerClient` | `/v1/chat/completions` (native vLLM) via direct HTTP |
+| Config fields | `judge_model_server` (a `ModelServerRef`) | `judge_server_url` + `judge_model` (both mandated, no defaults) |
+| Init validation | (none — Gym spins up the judge) | `judge_server_url` normalized + `judge_model` checked against `/v1/models` |
+| Math-verify / verdict / data schema | — | **Identical** (inherited from `math_with_judge_original`) |
+
+Everything else — `[[A=B]]`/`[[A!=B]]` verdict extraction, `should_use_judge` gate
+(judge only fires when `should_use_judge=True` AND library reward ≤ 0.5),
+two-ordered-pass positional-bias elimination, request/response models — is
+inherited unchanged.
+
+## Data compatibility
+
+Any dataset compatible with `math_with_judge_simple_agent` (the original variant
+under `math_with_judge_original/`) works here **unchanged** — the
+`agent_ref.name` is the same (`math_with_judge_simple_agent`). See
+`data/README.md` for details.
+
+## Configuration
+
+```yaml
+math_with_judge:
+  resources_servers:
+    math_with_judge:
+      entrypoint: app.py
+
+      # MANDATED (no defaults):
+      judge_server_url: "0.0.0.0:8000"   # host:port of the external vLLM judge
+      judge_model: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        temperature: 0.7
+        top_p: 0.8
+
+      should_use_judge: true
 ```
 
-To download the OpenMathReasoning dataset, the following command can be run:
-```bash
-ng_download_dataset_from_gitlab \
-    +dataset_name=math_open_math_reasoning \
-    +version=0.0.1 \
-    +artifact_fpath=open_math_reasoning_problems.jsonl \
-    +output_fpath=data/open_math_reasoning_problems.jsonl
+### NeMo-RL integration
+
+To use this from an NRL GRPO config, add the config path and override
+`judge_server_url`/`judge_model`:
+
+```yaml
+env:
+  nemo_gym:
+    config_paths:
+      - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    math_with_judge:
+      resources_servers:
+        math_with_judge:
+          judge_server_url: "0.0.0.0:8000"
+          judge_model: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+          judge_responses_create_params:
+            max_output_tokens: 8192
+            temperature: ${policy.generation.temperature}
+            top_p: ${policy.generation.top_p}
+          should_use_judge: true
 ```
 
-Then, rollouts can be collected using a command such as the following:
+## Testing
+
 ```bash
-ng_collect_rollouts \
-    +agent_name=math_with_judge_simple_agent \
-    +input_jsonl_fpath=data/open_math_reasoning_problems.jsonl \
-    +output_jsonl_fpath=results/example_open_math_reasoning_verify_responses.jsonl \
-    +limit=5
+ng_test +entrypoint=resources_servers/math_with_judge
 ```
 
-## Prepare for trajectory collection
+Or directly:
+
 ```bash
-config_paths="resources_servers/math_with_judge/configs/dapo17k_trajectory_collection.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_prepare_data "+config_paths=[$config_paths]" \
-    +output_dirpath=data/dapo17k_trajectory_collection \
-    +mode=train_preparation \
-    +should_download=true
+cd 3rdparty/Gym-workspace/Gym && conda run -n trashrepo_v2 env PYTHONPATH=. \
+  python -m pytest resources_servers/math_with_judge/tests/ -v --timeout=60
 ```
 
-# Licensing information
-Code: Apache 2.0<br>
-Data:
-- OpenMathReasoning: Creative Commons Attribution 4.0 International
-- Math Stack Overflow: Creative Commons Attribution-ShareAlike 4.0 International
+Tests cover (no network required):
+- `judge_server_url` normalization (`0.0.0.0:8000`, full URLs, path stripping, empty rejection)
+- chat-completions payload building (`max_output_tokens` → `max_tokens`, temperature/top_p)
+- chat-completion text extraction (string and list content)
+- minimal `NeMoGymResponse` construction wrapping chat-completions output
+- config required-field enforcement (`judge_server_url` / `judge_model` / `judge_responses_create_params`)
+- inherited library verifier and math delimiter stripping
 
-Dependencies
-- nemo_gym: Apache 2.0
-- math-verify: [Apache 2.0](https://github.com/huggingface/Math-Verify/blob/5d148cfaaf99214c2e4ffb4bc497ab042c592a7a/LICENCE)
+## File Structure
+
+```
+math_with_judge/
+├── app.py                          # Server subclass + chat-completions judge
+├── requirements.txt                # -e nemo-gym[dev] @ ../../, math-verify
+├── README.md                       # This file
+├── configs/
+│   └── math_with_judge.yaml        # Server + agent configuration
+├── data/
+│   ├── example.jsonl               # Example data (committed)
+│   ├── .gitignore
+│   └── README.md
+└── tests/
+    ├── __init__.py
+    └── test_app.py
+```

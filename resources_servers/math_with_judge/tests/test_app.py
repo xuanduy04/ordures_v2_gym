@@ -12,567 +12,208 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
-from copy import deepcopy
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
-from math_verify.errors import TimeoutException
-from pydantic import ValidationError
-from pytest import approx, fixture, raises
+import pytest
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputItem,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputRefusal,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseReasoningItem,
-)
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+
 from resources_servers.math_with_judge.app import (
-    JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
-    LibraryJudgeMathVerifyRequest,
+    _build_chat_completions_payload,
+    _build_judge_response,
+    _extract_chat_completion_text,
+    _messages_to_chat_format,
+    _normalize_judge_server_url,
 )
 
 
-class TestApp:
-    @fixture
-    def config(self) -> LibraryJudgeMathResourcesServerConfig:
-        return LibraryJudgeMathResourcesServerConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            judge_model_server=ModelServerRef(
-                type="responses_api_models",
-                name="math_judge",
+def _make_config(**overrides):
+    base = dict(
+        host="",
+        port=0,
+        entrypoint="",
+        name="test",
+        judge_server_url="0.0.0.0:8000",
+        judge_model="test-model",
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    base.update(overrides)
+    return LibraryJudgeMathResourcesServerConfig(**base)
+
+
+class TestNormalizeJudgeServerUrl:
+    def test_bare_host_port(self):
+        assert _normalize_judge_server_url("0.0.0.0:8000") == "http://0.0.0.0:8000"
+
+    def test_full_url(self):
+        assert _normalize_judge_server_url("http://0.0.0.0:8000") == "http://0.0.0.0:8000"
+
+    def test_drops_path(self):
+        assert _normalize_judge_server_url("http://0.0.0.0:8000/extra/stuff/behind") == "http://0.0.0.0:8000"
+
+    def test_https(self):
+        assert _normalize_judge_server_url("https://judge.example.com:8443") == "https://judge.example.com:8443"
+
+    def test_strips_whitespace_and_slashes(self):
+        assert _normalize_judge_server_url("  0.0.0.0:8000/  ") == "http://0.0.0.0:8000"
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError):
+            _normalize_judge_server_url("")
+
+    def test_whitespace_only_raises(self):
+        with pytest.raises(ValueError):
+            _normalize_judge_server_url("   ")
+
+
+class TestMessagesToChatFormat:
+    def test_string_content(self):
+        msgs = [
+            NeMoGymEasyInputMessage(role="system", content="be precise"),
+            NeMoGymEasyInputMessage(role="user", content="judge this"),
+        ]
+        out = _messages_to_chat_format(msgs)
+        assert out == [
+            {"role": "system", "content": "be precise"},
+            {"role": "user", "content": "judge this"},
+        ]
+
+    def test_list_content_text_parts(self):
+        msgs = [
+            NeMoGymEasyInputMessage(
+                role="user",
+                content=[
+                    {"type": "input_text", "text": "hello "},
+                    {"type": "input_text", "text": "world"},
+                ],
             ),
+        ]
+        out = _messages_to_chat_format(msgs)
+        assert out == [{"role": "user", "content": "hello world"}]
+
+
+class TestBuildChatCompletionsPayload:
+    def test_maps_max_output_tokens_to_max_tokens(self):
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[], max_output_tokens=8192, temperature=0.7, top_p=0.8
+        )
+        msgs = [NeMoGymEasyInputMessage(role="user", content="q")]
+        payload = _build_chat_completions_payload(params, msgs, "my-model")
+        assert payload["model"] == "my-model"
+        assert payload["stream"] is False
+        assert payload["max_tokens"] == 8192
+        assert payload["temperature"] == 0.7
+        assert payload["top_p"] == 0.8
+        assert payload["messages"] == [{"role": "user", "content": "q"}]
+
+    def test_omits_optional_when_none(self):
+        params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+        msgs = [NeMoGymEasyInputMessage(role="user", content="q")]
+        payload = _build_chat_completions_payload(params, msgs, "m")
+        assert "max_tokens" not in payload
+        assert "temperature" not in payload
+        assert "top_p" not in payload
+        assert payload["model"] == "m"
+
+
+class TestExtractChatCompletionText:
+    def test_string_content(self):
+        data = {"choices": [{"message": {"content": "Analysis... [[A=B]]"}}]}
+        assert _extract_chat_completion_text(data) == "Analysis... [[A=B]]"
+
+    def test_list_content(self):
+        data = {"choices": [{"message": {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}]}
+        assert _extract_chat_completion_text(data) == "ab"
+
+    def test_no_choices(self):
+        assert _extract_chat_completion_text({}) == ""
+        assert _extract_chat_completion_text({"choices": []}) == ""
+
+
+class TestBuildJudgeResponse:
+    def test_wraps_judge_text_in_minimal_response(self):
+        resp = _build_judge_response("[[A=B]]", "my-model")
+        assert resp.model == "my-model"
+        assert resp.id == "chat_completion_judge"
+        assert resp.object == "response"
+        assert resp.parallel_tool_calls is False
+        assert resp.tool_choice == "none"
+        assert resp.tools == []
+        assert len(resp.output) == 1
+        msg = resp.output[0]
+        assert msg.type == "message"
+        assert msg.role == "assistant"
+        assert msg.status == "completed"
+        assert len(msg.content) == 1
+        assert msg.content[0].type == "output_text"
+        assert msg.content[0].text == "[[A=B]]"
+
+
+class TestConfigRequiredFields:
+    def test_missing_judge_server_url_raises(self):
+        with pytest.raises(Exception):
+            _make_config(judge_server_url=None)
+
+    def test_missing_judge_model_raises(self):
+        with pytest.raises(Exception):
+            _make_config(judge_model=None)
+
+    def test_missing_judge_responses_create_params_raises(self):
+        with pytest.raises(Exception):
+            _make_config(judge_responses_create_params=None)
+
+    def test_valid_config(self):
+        cfg = _make_config()
+        assert cfg.judge_server_url == "0.0.0.0:8000"
+        assert cfg.judge_model == "test-model"
+
+    def test_default_name(self):
+        cfg = LibraryJudgeMathResourcesServerConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            judge_server_url="0.0.0.0:8000",
+            judge_model="m",
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )
+        assert cfg.name == "math_with_judge"
 
-    def _create_response(self, id: str, output_item: NeMoGymResponseOutputItem) -> dict[str, Any]:
-        return NeMoGymResponse(
-            id=id,
-            created_at=1234.5,
-            model="response_model",
-            object="response",
-            output=[output_item],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        ).model_dump()
+    def test_no_judge_model_server_field(self):
+        # This config must not carry the Gym-managed judge_model_server.
+        cfg = _make_config()
+        assert not hasattr(cfg, "judge_model_server") or "judge_model_server" not in cfg.model_fields
 
-    def _check_judge_evaluation(
-        self,
-        judge_evaluation: JudgeEvaluation,
-        question: str,
-        first_answer: str,
-        second_answer: str,
-        expected_create_params: dict[str, Any],
-        expected_response_id: str,
-        expected_output_item: NeMoGymResponseOutputItem,
-    ) -> None:
-        expected_prompt = LibraryJudgeMathResourcesServer.JUDGE_PROMPT_TEMPLATE.format(
-            question=question, first_answer=first_answer, second_answer=second_answer
-        )
-        assert judge_evaluation.responses_create_params == NeMoGymResponseCreateParamsNonStreaming(
-            **expected_create_params,
-            input=[
-                {
-                    "role": "system",
-                    "content": LibraryJudgeMathResourcesServer.JUDGE_SYSTEM_MESSAGE,
-                },
-                {
-                    "role": "user",
-                    "content": expected_prompt,
-                },
-            ],
-        )
 
-        actual_response = judge_evaluation.response
-        assert actual_response.output == [expected_output_item]
-        response_map = actual_response.model_dump(exclude_none=True)
-        assert response_map.pop("id") == expected_response_id
-        assert response_map.pop("created_at") == approx(1234.5)
-        assert response_map.pop("model") == "response_model"
-        assert response_map.pop("object") == "response"
-        assert response_map.pop("parallel_tool_calls") is False
-        assert response_map.pop("tool_choice") == "none"
-        assert response_map.pop("tools") == []
-        assert list(response_map) == ["output"]
+class TestInheritedLibraryVerifier:
+    """Library verifier logic is inherited unchanged from the original LibraryJudgeMathResourcesServer."""
 
-    def _create_response_output_message(self, message_text: str) -> NeMoGymResponseOutputMessage:
-        return NeMoGymResponseOutputMessage(
-            id=f"ID for {message_text}",
-            content=[NeMoGymResponseOutputText(annotations=[], text=message_text, type="output_text")],
-            role="assistant",
-            status="in_progress",
-            type="message",
-        )
+    def test_verify_answer_with_library_inherited(self):
+        from unittest.mock import MagicMock
 
-    async def test_verify(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
-        server_mock = MagicMock(spec=ServerClient)
-        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-        response_mock = AsyncMock()
-        post_mock = MagicMock()
-        post_mock.read = response_mock
-        server_mock.post = AsyncMock(return_value=post_mock)
-        not_equal_item = self._create_response_output_message(
-            f"{LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL} done"
-        )
-        response_mock.return_value = json.dumps(self._create_response("verify_not_equal_id", not_equal_item))
+        from nemo_gym.server_utils import ServerClient
 
-        question = "Simplify the expression x + 7 - 6"
-        expected_answer = "x + 1"
-        model_create_params = NeMoGymResponseCreateParamsNonStreaming(
-            input=[
-                {
-                    "role": "user",
-                    "content": question,
-                }
-            ]
-        )
-        first_part = "$1"
-        first_part_item = self._create_response_output_message(first_part)
-        first_model_response = NeMoGymResponse(**self._create_response("first_part_id", first_part_item))
-        not_equal_verify_request = LibraryJudgeMathVerifyRequest(
-            responses_create_params=deepcopy(model_create_params),
-            response=first_model_response.model_copy(deep=True),
-            question=question,
-            expected_answer=expected_answer,
-        )
-        not_equal_verify_response = await resources_server.verify(not_equal_verify_request)
-        assert not_equal_verify_response.responses_create_params == model_create_params
-        assert not_equal_verify_response.response == first_model_response
-        assert not_equal_verify_response.reward == approx(0.0)
-        assert not_equal_verify_response.expected_answer == expected_answer
-        assert not_equal_verify_response.extracted_answer == "1"
-        assert not_equal_verify_response.library_reward == approx(0.0)
-        judge_evaluations = not_equal_verify_response.judge_evaluations
-        assert len(judge_evaluations) == 1
-        self._check_judge_evaluation(
-            judge_evaluations[0],
-            question,
-            expected_answer,
-            not_equal_verify_response.extracted_answer,
-            {},
-            "verify_not_equal_id",
-            not_equal_item,
-        )
-        assert sorted(list(not_equal_verify_response.model_dump())) == [
-            "expected_answer",
-            "extracted_answer",
-            "judge_evaluations",
-            "library_reward",
-            "response",
-            "responses_create_params",
-            "reward",
-        ]
+        cfg = _make_config()
+        mock_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
 
-        second_model_response = first_model_response.model_copy(deep=True)
-        second_model_response.output = second_model_response.output + [
-            NeMoGymResponseReasoningItem(id="extra_reasoning", summary=[], type="reasoning"),
-            self._create_response_output_message(" + x$"),
-            NeMoGymResponseOutputMessage(
-                id="refusal_finish",
-                content=[
-                    NeMoGymResponseOutputRefusal(refusal="no response", type="refusal"),
-                ],
-                role="assistant",
-                status="completed",
-                type="message",
-            ),
-        ]
-        equal_verify_request = LibraryJudgeMathVerifyRequest(
-            responses_create_params=deepcopy(model_create_params),
-            response=second_model_response.model_copy(deep=True),
-            question=question,
-            expected_answer=expected_answer,
-        )
-        equal_verify_response = await resources_server.verify(equal_verify_request)
-        assert equal_verify_response.responses_create_params == model_create_params
-        assert equal_verify_response.response == second_model_response
-        assert equal_verify_response.reward == approx(1.0)
-        assert equal_verify_response.expected_answer == expected_answer
-        assert equal_verify_response.extracted_answer == "x + 1"
-        assert equal_verify_response.library_reward == approx(1.0)
-        assert equal_verify_response.judge_evaluations is None
-        assert sorted(list(equal_verify_response.model_dump())) == [
-            "expected_answer",
-            "extracted_answer",
-            "judge_evaluations",
-            "library_reward",
-            "response",
-            "responses_create_params",
-            "reward",
-        ]
+        reward, extracted = server._verify_answer_with_library("4", "2 + 2 = \\boxed{4}")
+        assert reward == pytest.approx(1.0)
+        assert extracted == "4"
 
-    async def test_verify_answer(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
-        server_mock = MagicMock(spec=ServerClient)
-        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-        response_mock = AsyncMock()
-        post_mock = MagicMock()
-        post_mock.read = response_mock
-        server_mock.post = AsyncMock(return_value=post_mock)
+        reward, extracted = server._verify_answer_with_library("\\boxed{12}", "3 * 4 = 13")
+        assert reward == pytest.approx(0.0)
+        assert extracted == "13"
 
-        (
-            equal_reward,
-            equal_extracted_answer,
-            equal_library_reward,
-            equal_judge_evaluations,
-        ) = await resources_server._verify_answer("What is 3 plus 5?", "8", "3 + 5 = \\boxed{8}")
-        assert equal_reward == approx(1.0)
-        assert equal_extracted_answer == "8"
-        assert equal_library_reward == approx(1.0)
-        assert equal_judge_evaluations is None
+    def test_strip_math_delimiters_inherited(self):
+        from unittest.mock import MagicMock
 
-        not_equal_item = self._create_response_output_message(
-            f"Conclusion: {LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL}"
-        )
-        response_mock.side_effect = [json.dumps(self._create_response("verify_answer_not_equal_id", not_equal_item))]
-        not_equal_question = "What is 1 + 1?"
-        not_equal_expected_answer = "2"
-        not_equal_generated_answer = "3"
-        (
-            not_equal_reward,
-            not_equal_extracted_answer,
-            not_equal_library_reward,
-            not_equal_judge_evaluations,
-        ) = await resources_server._verify_answer(
-            not_equal_question,
-            not_equal_expected_answer,
-            not_equal_generated_answer,
-        )
-        assert not_equal_reward == approx(0.0)
-        assert not_equal_extracted_answer == "3"
-        assert not_equal_library_reward == approx(0.0)
-        assert len(not_equal_judge_evaluations) == 1
-        self._check_judge_evaluation(
-            not_equal_judge_evaluations[0],
-            not_equal_question,
-            not_equal_expected_answer,
-            not_equal_generated_answer,
-            {},
-            "verify_answer_not_equal_id",
-            not_equal_item,
-        )
+        from nemo_gym.server_utils import ServerClient
 
-        first_judge_equal_item = self._create_response_output_message(
-            f"I say {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL} as the verdict"
-        )
-        second_judge_equal_item = self._create_response_output_message(
-            LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL
-        )
-        response_mock.side_effect = [
-            json.dumps(self._create_response("verify_answer_first_judge_equal_id", first_judge_equal_item)),
-            json.dumps(self._create_response("verify_answer_second_judge_equal_id", second_judge_equal_item)),
-        ]
-        judge_equal_question = "What is 14 divided by 10?"
-        judge_equal_expected_answer = "1.4"
-        judge_equal_generated_answer = "Final answer: {7 / 5}"
-        (
-            judge_equal_reward,
-            judge_equal_extracted_answer,
-            judge_equal_library_reward,
-            judge_equal_judge_evaluations,
-        ) = await resources_server._verify_answer(
-            judge_equal_question,
-            judge_equal_expected_answer,
-            judge_equal_generated_answer,
-        )
-        assert judge_equal_reward == approx(1.0)
-        assert judge_equal_extracted_answer == "5"
-        assert judge_equal_library_reward == approx(0.0)
-        assert len(judge_equal_judge_evaluations) == 2
-        self._check_judge_evaluation(
-            judge_equal_judge_evaluations[0],
-            judge_equal_question,
-            judge_equal_expected_answer,
-            judge_equal_extracted_answer,
-            {},
-            "verify_answer_first_judge_equal_id",
-            first_judge_equal_item,
-        )
-        self._check_judge_evaluation(
-            judge_equal_judge_evaluations[1],
-            judge_equal_question,
-            judge_equal_extracted_answer,
-            judge_equal_expected_answer,
-            {},
-            "verify_answer_second_judge_equal_id",
-            second_judge_equal_item,
-        )
+        cfg = _make_config()
+        mock_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
 
-    def test_verify_answer_with_library(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
-        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
-        assert resources_server._verify_answer_with_library("4", "2 + 2 = \\boxed{4}") == (approx(1.0), "4")
-        assert resources_server._verify_answer_with_library("\\boxed{12}", "3 * 4 = \\boxed{12}") == (
-            approx(1.0),
-            "12",
-        )
-        assert resources_server._verify_answer_with_library("\\boxed{5}", "10 - 5 = \\boxed{5}") == (approx(1.0), "5")
-        assert resources_server._verify_answer_with_library("4.0", "2 + 2 = \\boxed{\\frac{8}{2}}") == (
-            approx(1.0),
-            "4",
-        )
-
-        assert resources_server._verify_answer_with_library("\\boxed{12}", "3 * 4 = 13") == (approx(0.0), "13")
-        assert resources_server._verify_answer_with_library("17.001", "17") == (
-            approx(0.0),
-            "17",
-        )
-
-        assert resources_server._verify_answer_with_library("", "") == (
-            approx(0.0),
-            None,
-        )
-
-        assert resources_server._verify_answer_with_library("3", "3") == (
-            approx(1.0),
-            "3",
-        )
-        timeout_mock = MagicMock(side_effect=TimeoutException())
-        resources_server._library_verifier = timeout_mock
-        assert resources_server._verify_answer_with_library("3", "3") == (
-            approx(0.0),
-            None,
-        )
-
-    async def test_verify_answer_with_judge(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
-        server_mock = MagicMock(spec=ServerClient)
-        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-        response_mock = AsyncMock()
-        post_mock = MagicMock()
-        post_mock.read = response_mock
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        first_not_equal_item = self._create_response_output_message(
-            f"{LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL} is the evaluation"
-        )
-        response_mock.side_effect = [json.dumps(self._create_response("first_not_equal_id", first_not_equal_item))]
-        first_not_equal_question = "What is 2 + 2?"
-        first_not_equal_expected_answer = "4"
-        first_not_equal_generated_answer = "5"
-        (
-            first_not_equal_reward,
-            first_not_equal_evaluations,
-        ) = await resources_server._verify_answer_with_judge(
-            first_not_equal_question,
-            first_not_equal_expected_answer,
-            first_not_equal_generated_answer,
-        )
-        assert first_not_equal_reward == approx(0.0)
-        assert len(first_not_equal_evaluations) == 1
-        self._check_judge_evaluation(
-            first_not_equal_evaluations[0],
-            first_not_equal_question,
-            first_not_equal_expected_answer,
-            first_not_equal_generated_answer,
-            {},
-            "first_not_equal_id",
-            first_not_equal_item,
-        )
-
-        first_equal_item = self._create_response_output_message(LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL)
-        second_equal_item = self._create_response_output_message(
-            f"I conclude that {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}"
-        )
-        response_mock.side_effect = [
-            json.dumps(self._create_response("second_equal_first_id", first_equal_item)),
-            json.dumps(self._create_response("second_equal_second_id", second_equal_item)),
-        ]
-        second_equal_question = "What is 3 divided by 6?"
-        second_equal_expected_answer = "1/2"
-        second_equal_generated_answer = "0.5"
-        (
-            second_equal_reward,
-            second_equal_evaluations,
-        ) = await resources_server._verify_answer_with_judge(
-            second_equal_question,
-            second_equal_expected_answer,
-            second_equal_generated_answer,
-        )
-        assert second_equal_reward == approx(1.0)
-        assert len(second_equal_evaluations) == 2
-        self._check_judge_evaluation(
-            second_equal_evaluations[0],
-            second_equal_question,
-            second_equal_expected_answer,
-            second_equal_generated_answer,
-            {},
-            "second_equal_first_id",
-            first_equal_item,
-        )
-        self._check_judge_evaluation(
-            second_equal_evaluations[1],
-            second_equal_question,
-            second_equal_generated_answer,
-            second_equal_expected_answer,
-            {},
-            "second_equal_second_id",
-            second_equal_item,
-        )
-
-        second_not_equal_item = self._create_response_output_message(
-            LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL
-        )
-        response_mock.side_effect = [
-            json.dumps(self._create_response("second_not_equal_first_id", second_equal_item)),
-            json.dumps(self._create_response("second_not_equal_second_id", second_not_equal_item)),
-        ]
-        second_not_equal_question = "What is 4 times 5?"
-        second_not_equal_expected_answer = "20"
-        second_not_equal_generated_answer = "20.0"
-        (
-            second_not_equal_reward,
-            second_not_equal_evaluations,
-        ) = await resources_server._verify_answer_with_judge(
-            second_not_equal_question,
-            second_not_equal_expected_answer,
-            second_not_equal_generated_answer,
-        )
-        assert second_not_equal_reward == approx(0.0)
-        assert len(second_not_equal_evaluations) == 2
-        self._check_judge_evaluation(
-            second_not_equal_evaluations[0],
-            second_not_equal_question,
-            second_not_equal_expected_answer,
-            second_not_equal_generated_answer,
-            {},
-            "second_not_equal_first_id",
-            second_equal_item,
-        )
-        self._check_judge_evaluation(
-            second_not_equal_evaluations[1],
-            second_not_equal_question,
-            second_not_equal_generated_answer,
-            second_not_equal_expected_answer,
-            {},
-            "second_not_equal_second_id",
-            second_not_equal_item,
-        )
-
-    async def _generate_and_check_judge_evaluation(
-        self,
-        resources_server: LibraryJudgeMathResourcesServer,
-        question: str,
-        expected_answers_equal: bool,
-        expected_response_id: str,
-        expected_output_item: NeMoGymResponseOutputItem,
-    ) -> None:
-        first_answer = f"{question}_1"
-        second_answer = f"{question}_2"
-        (
-            actual_answers_equal,
-            judge_evaluation,
-        ) = await resources_server._generate_judge_evaluation(question, first_answer, second_answer)
-        assert actual_answers_equal == expected_answers_equal
-        self._check_judge_evaluation(
-            judge_evaluation,
-            question,
-            first_answer,
-            second_answer,
-            {"max_output_tokens": 1024},
-            expected_response_id,
-            expected_output_item,
-        )
-
-    async def test_generate_judge_evaluation(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
-        judge_config = config.model_copy(deep=True)
-        judge_config.judge_responses_create_params.max_output_tokens = 1024
-        server_mock = MagicMock(spec=ServerClient)
-        resources_server = LibraryJudgeMathResourcesServer(config=judge_config, server_client=server_mock)
-        response_mock = AsyncMock()
-        post_mock = MagicMock()
-        post_mock.read = response_mock
-        server_mock.post = AsyncMock(return_value=post_mock)
-
-        response_mock.return_value = json.dumps({})
-        with raises(ValidationError, match="Field required"):
-            await resources_server._generate_judge_evaluation("invalid_response", "invalid_1", "invalid_2")
-
-        reasoning_item = NeMoGymResponseReasoningItem(id="reasoning_item", summary=[], type="reasoning")
-        response_mock.return_value = json.dumps(self._create_response("reasoning_id", reasoning_item))
-        await self._generate_and_check_judge_evaluation(
-            resources_server,
-            "reasoning_question",
-            False,
-            "reasoning_id",
-            reasoning_item,
-        )
-
-        refusal_item = NeMoGymResponseOutputMessage(
-            id="refusal_item",
-            content=[
-                NeMoGymResponseOutputRefusal(refusal="I refuse", type="refusal"),
-            ],
-            role="assistant",
-            status="completed",
-            type="message",
-        )
-        response_mock.return_value = json.dumps(self._create_response("refusal_id", refusal_item))
-        await self._generate_and_check_judge_evaluation(
-            resources_server, "refusal_question", False, "refusal_id", refusal_item
-        )
-
-        no_evaluation_item = self._create_response_output_message("no evaluation")
-        response_mock.return_value = json.dumps(self._create_response("no_evaluation_id", no_evaluation_item))
-        await self._generate_and_check_judge_evaluation(
-            resources_server,
-            "no_evaluation_question",
-            False,
-            "no_evaluation_id",
-            no_evaluation_item,
-        )
-
-        not_equal_item = self._create_response_output_message(
-            f"Evaluation: {LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL}"
-        )
-        response_mock.return_value = json.dumps(self._create_response("not_equal_id", not_equal_item))
-        await self._generate_and_check_judge_evaluation(
-            resources_server,
-            "not_equal_question",
-            False,
-            "not_equal_id",
-            not_equal_item,
-        )
-
-        equal_item = self._create_response_output_message(
-            f"The evaluation is {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}"
-        )
-        response_mock.return_value = json.dumps(self._create_response("equal_id", equal_item))
-        await self._generate_and_check_judge_evaluation(
-            resources_server, "equal_question", True, "equal_id", equal_item
-        )
-
-        equal_first_item = self._create_response_output_message(
-            f"First {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}, "
-            f"then {LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL}"
-        )
-        response_mock.return_value = json.dumps(self._create_response("equal_first_id", equal_first_item))
-        await self._generate_and_check_judge_evaluation(
-            resources_server,
-            "equal_first_question",
-            True,
-            "equal_first_id",
-            equal_first_item,
-        )
-
-        not_equal_first_item = self._create_response_output_message(
-            f"{LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL} "
-            f"{LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL}"
-        )
-        response_mock.return_value = json.dumps(self._create_response("not_equal_first_id", not_equal_first_item))
-        await self._generate_and_check_judge_evaluation(
-            resources_server,
-            "not_equal_first_question",
-            False,
-            "not_equal_first_id",
-            not_equal_first_item,
-        )
+        assert server._strip_math_delimiters("\\(x + 1\\)") == "x + 1"
+        assert server._strip_math_delimiters("$x + 1$") == "x + 1"
+        assert server._strip_math_delimiters("x + 1") == "x + 1"
