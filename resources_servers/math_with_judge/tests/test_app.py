@@ -15,16 +15,12 @@
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
-    _build_chat_completions_payload,
     _build_judge_response,
-    _extract_chat_completion_text,
-    _messages_to_chat_format,
-    _normalize_judge_server_url,
 )
 
 
@@ -40,95 +36,6 @@ def _make_config(**overrides):
     )
     base.update(overrides)
     return LibraryJudgeMathResourcesServerConfig(**base)
-
-
-class TestNormalizeJudgeServerUrl:
-    def test_bare_host_port(self):
-        assert _normalize_judge_server_url("0.0.0.0:8000") == "http://0.0.0.0:8000"
-
-    def test_full_url(self):
-        assert _normalize_judge_server_url("http://0.0.0.0:8000") == "http://0.0.0.0:8000"
-
-    def test_drops_path(self):
-        assert _normalize_judge_server_url("http://0.0.0.0:8000/extra/stuff/behind") == "http://0.0.0.0:8000"
-
-    def test_https(self):
-        assert _normalize_judge_server_url("https://judge.example.com:8443") == "https://judge.example.com:8443"
-
-    def test_strips_whitespace_and_slashes(self):
-        assert _normalize_judge_server_url("  0.0.0.0:8000/  ") == "http://0.0.0.0:8000"
-
-    def test_empty_raises(self):
-        with pytest.raises(ValueError):
-            _normalize_judge_server_url("")
-
-    def test_whitespace_only_raises(self):
-        with pytest.raises(ValueError):
-            _normalize_judge_server_url("   ")
-
-
-class TestMessagesToChatFormat:
-    def test_string_content(self):
-        msgs = [
-            NeMoGymEasyInputMessage(role="system", content="be precise"),
-            NeMoGymEasyInputMessage(role="user", content="judge this"),
-        ]
-        out = _messages_to_chat_format(msgs)
-        assert out == [
-            {"role": "system", "content": "be precise"},
-            {"role": "user", "content": "judge this"},
-        ]
-
-    def test_list_content_text_parts(self):
-        msgs = [
-            NeMoGymEasyInputMessage(
-                role="user",
-                content=[
-                    {"type": "input_text", "text": "hello "},
-                    {"type": "input_text", "text": "world"},
-                ],
-            ),
-        ]
-        out = _messages_to_chat_format(msgs)
-        assert out == [{"role": "user", "content": "hello world"}]
-
-
-class TestBuildChatCompletionsPayload:
-    def test_maps_max_output_tokens_to_max_tokens(self):
-        params = NeMoGymResponseCreateParamsNonStreaming(
-            input=[], max_output_tokens=8192, temperature=0.7, top_p=0.8
-        )
-        msgs = [NeMoGymEasyInputMessage(role="user", content="q")]
-        payload = _build_chat_completions_payload(params, msgs, "my-model")
-        assert payload["model"] == "my-model"
-        assert payload["stream"] is False
-        assert payload["max_tokens"] == 8192
-        assert payload["temperature"] == 0.7
-        assert payload["top_p"] == 0.8
-        assert payload["messages"] == [{"role": "user", "content": "q"}]
-
-    def test_omits_optional_when_none(self):
-        params = NeMoGymResponseCreateParamsNonStreaming(input=[])
-        msgs = [NeMoGymEasyInputMessage(role="user", content="q")]
-        payload = _build_chat_completions_payload(params, msgs, "m")
-        assert "max_tokens" not in payload
-        assert "temperature" not in payload
-        assert "top_p" not in payload
-        assert payload["model"] == "m"
-
-
-class TestExtractChatCompletionText:
-    def test_string_content(self):
-        data = {"choices": [{"message": {"content": "Analysis... [[A=B]]"}}]}
-        assert _extract_chat_completion_text(data) == "Analysis... [[A=B]]"
-
-    def test_list_content(self):
-        data = {"choices": [{"message": {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}]}
-        assert _extract_chat_completion_text(data) == "ab"
-
-    def test_no_choices(self):
-        assert _extract_chat_completion_text({}) == ""
-        assert _extract_chat_completion_text({"choices": []}) == ""
 
 
 class TestBuildJudgeResponse:
