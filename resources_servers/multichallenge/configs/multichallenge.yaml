@@ -9,8 +9,9 @@
 #
 # The judge is queried via {judge_server_url}/v1/chat/completions (native vLLM),
 # NOT the Responses API. All rubric / aggregation / verdict / data-schema logic
-# is inherited from `multichallenge_original`, so any dataset compatible with
-# `multichallenge_simple_agent` works unchanged.
+# is inherited from `multichallenge_original`.
+#
+# This config defines the MultiChallenge environment setup.
 # ============================================================================
 
 # ============================================================================
@@ -26,11 +27,7 @@ multichallenge:
       # MANDATED: model name served at judge_server_url (no default).
       judge_model: ""
 
-      # Parameters for judge requests.
-      # `max_output_tokens` is mapped to `max_tokens` in the chat-completions payload.
-      # NOTE: temperature and top_p must match policy.generation settings in the
-      # grpo config because NeMo-RL enforces consistent sampling params for
-      # on-policy inference.
+      # Parameters for judge requests
       judge_responses_create_params:
         input: []
         max_output_tokens: 8192
@@ -69,7 +66,7 @@ multichallenge:
       no_label: "[[NO]]"
 
       domain: knowledge
-      description: "MultiChallenge benchmark evaluation with an externally-hosted LLM judge"
+      description: "MultiChallenge benchmark evaluation with LLM judge"
       verified: false
 
 # ============================================================================
@@ -98,4 +95,3 @@ multichallenge_simple_agent:
           type: train
           license: "TBD"
           jsonl_fpath: resources_servers/multichallenge/data/vanilla.jsonl
-      verified: false

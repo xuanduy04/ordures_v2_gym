@@ -10,8 +10,10 @@
 #
 # The GenRM model is queried via {genrm_server_url}/v1/chat/completions
 # (native vLLM), NOT the Responses API. All pairwise comparison / aggregation /
-# parse / data-schema logic is inherited from `genrm_compare_original`, so any
-# dataset compatible with `genrm_simple_agent` works unchanged.
+# parse / data-schema logic is inherited from `genrm_compare_original`.
+#
+# This server compares multiple candidate responses using a GenRM model.
+# The GenRM model uses a special chat template with roles 'response_1' and 'response_2'.
 #
 # Expected GenRM output format (JSON):
 # {
@@ -34,8 +36,7 @@ genrm_compare:
       # MANDATED: GenRM model name served at genrm_server_url (no default).
       genrm_model: ""
 
-      # Parameters for GenRM model requests.
-      # `max_output_tokens` is mapped to `max_tokens` in the chat-completions payload.
+      # Generation params for GenRM calls
       genrm_responses_create_params:
         input: []
         max_output_tokens: 16384
@@ -58,10 +59,13 @@ genrm_compare:
       # Top percentile threshold (e.g., 0.2 = top 20%)
       top_percentile: 0.2
       # Group-relative length penalty coefficients
+      # Shorter responses get bonus, longer get penalty (mean-centered)
       group_reasoning_length_penalty_coeff: 0.0
       group_answer_length_penalty_coeff: 0.0
+      # Group-relative style penalty coefficient
+      # Lower formatting density (headers, lists, bold, emoji) gets bonus
       group_style_penalty_coeff: 0.0
-      # Set reward to 1.0 when reasoning content matches final answer
+      # Set reward to 1.0 (genrm gives 1 to 5 scores) when reasoning content matches final answer
       reasoning_answer_repeat_penalty: true
 
       # Default scores when parsing fails
@@ -71,12 +75,10 @@ genrm_compare:
       # Server metadata
       domain: rlhf
       verified: false
-      description: GenRM pairwise comparison for RLHF training (externally-hosted GenRM model judge)
-      value: Compare multiple candidate responses using externally-hosted GenRM model
+      description: GenRM pairwise comparison for RLHF training
+      value: Compare multiple candidate responses using GenRM model
 
-# ============================================================================
 # GenRM Simple Agent - wraps genrm_compare for GRPO training
-# ============================================================================
 genrm_simple_agent:
   responses_api_agents:
     simple_agent:
