@@ -1,0 +1,6 @@
+# Ignore all data files in this directory
+
+# Keep these files
+!.gitignore
+!README.md
+!example.jsonl

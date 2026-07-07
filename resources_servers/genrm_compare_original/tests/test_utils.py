@@ -15,7 +15,7 @@
 import pytest
 from pytest import approx
 
-from resources_servers.genrm_compare.utils import (
+from resources_servers.genrm_compare_original.utils import (
     GenRMOutputParseError,
     aggregate_scores,
     extract_from_response_obj,
