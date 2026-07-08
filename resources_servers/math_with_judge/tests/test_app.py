@@ -92,10 +92,10 @@ class TestConfigRequiredFields:
         assert not hasattr(cfg, "judge_model_server") or "judge_model_server" not in cfg.model_fields
 
 
-class TestInheritedLibraryVerifier:
-    """Library verifier logic is inherited unchanged from the original LibraryJudgeMathResourcesServer."""
+class TestLibraryVerifier:
+    """Library verifier uses explicit boxed / answer-colon extraction before math_verify comparison."""
 
-    def test_verify_answer_with_library_inherited(self):
+    def test_verify_answer_with_library_boxed(self):
         from unittest.mock import MagicMock
 
         from nemo_gym.server_utils import ServerClient
@@ -104,15 +104,88 @@ class TestInheritedLibraryVerifier:
         mock_client = MagicMock(spec=ServerClient)
         server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
 
+        # Boxed answer matches expected
         reward, extracted = server._verify_answer_with_library("4", "2 + 2 = \\boxed{4}")
         assert reward == pytest.approx(1.0)
         assert extracted == "4"
 
+        # Boxed answer matches expected (with latex in boxed)
+        reward, extracted = server._verify_answer_with_library("\\boxed{12}", "3 * 4 = \\boxed{12}")
+        assert reward == pytest.approx(1.0)
+        assert extracted == "12"
+
+        # Boxed answer matches expected (fraction)
+        reward, extracted = server._verify_answer_with_library("4.0", "2 + 2 = \\boxed{\\frac{8}{2}}")
+        assert reward == pytest.approx(1.0)
+        assert extracted == "\\frac{8}{2}"
+
+    def test_verify_answer_with_library_answer_colon(self):
+        from unittest.mock import MagicMock
+
+        from nemo_gym.server_utils import ServerClient
+
+        cfg = _make_config()
+        mock_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
+
+        # Answer colon extraction fallback (no boxed)
+        reward, extracted = server._verify_answer_with_library("4", "Answer: 4")
+        assert reward == pytest.approx(1.0)
+        assert extracted == "4"
+
+        # Boxed takes priority over answer_colon when both present
+        reward, extracted = server._verify_answer_with_library("3", "Answer: 5 \\boxed{3}")
+        assert reward == pytest.approx(1.0)
+        assert extracted == "3"
+
+    def test_verify_answer_with_library_no_extraction(self):
+        from unittest.mock import MagicMock
+
+        from nemo_gym.server_utils import ServerClient
+
+        cfg = _make_config()
+        mock_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
+
+        # No boxed and no answer_colon marker — extraction fails, returns 0
         reward, extracted = server._verify_answer_with_library("\\boxed{12}", "3 * 4 = 13")
         assert reward == pytest.approx(0.0)
-        assert extracted == "13"
+        assert extracted is None
 
-    def test_strip_math_delimiters_inherited(self):
+        # Empty strings
+        reward, extracted = server._verify_answer_with_library("", "")
+        assert reward == pytest.approx(0.0)
+        assert extracted is None
+
+    def test_verify_answer_with_library_exact(self):
+        from unittest.mock import MagicMock
+
+        from nemo_gym.server_utils import ServerClient
+
+        cfg = _make_config()
+        mock_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
+
+        # Direct numeric comparison via boxed extraction
+        reward, extracted = server._verify_answer_with_library("3", "\\boxed{3}")
+        assert reward == pytest.approx(1.0)
+        assert extracted == "3"
+
+    def test_verify_answer_with_library_mismatch(self):
+        from unittest.mock import MagicMock
+
+        from nemo_gym.server_utils import ServerClient
+
+        cfg = _make_config()
+        mock_client = MagicMock(spec=ServerClient)
+        server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
+
+        # Boxed answer does not match expected
+        reward, extracted = server._verify_answer_with_library("\\boxed{5}", "10 - 5 = \\boxed{4}")
+        assert reward == pytest.approx(0.0)
+        assert extracted == "4"
+
+    def test_strip_math_delimiters(self):
         from unittest.mock import MagicMock
 
         from nemo_gym.server_utils import ServerClient

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any, List
 
+from math_verify.errors import TimeoutException
 from pydantic import Field
 
 from nemo_gym.openai_utils import (
@@ -51,6 +52,10 @@ from resources_servers.math_with_judge_original.app import (
 )
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 
+from resources_servers.math_with_judge.format_utils import (
+    last_answer_colon_string,
+    last_boxed_only_string,
+)
 from resources_servers.utils_outsource.judge_server_url_utils import (
     _build_chat_completions_payload,
     _extract_chat_completion_text,
@@ -170,6 +175,35 @@ class LibraryJudgeMathResourcesServer(_OriginalLibraryJudgeMathResourcesServer):
                 return True, judge_evaluation
             else:
                 return False, judge_evaluation
+
+
+    def _verify_answer_with_library(self, expected_answer: str, generated_answer: str):
+        """Verify the correctness of a generated answer using the math_verify library.
+
+        Overrides the original's naive approach which only relies on ``math_verify``'s internal extraction.
+        Instead, we explicitly extract the answer from the generated text
+        (tries ``\\boxed{}`` first, with multilingual ``Answer:`` as fallback)
+        """
+        try:
+            # try to manually parse the answer
+            extracted = last_boxed_only_string(generated_answer)
+            if not extracted:
+                extracted = last_answer_colon_string(generated_answer)
+
+            if not extracted:
+                # default to generated_answer
+                extracted = generated_answer
+
+            stripped_expected_answer = self._strip_math_delimiters(expected_answer)
+            ground_truth_parsable = "\\boxed{" + stripped_expected_answer + "}"
+
+            with self._mute_output():
+                ret_score, _ = self._library_verifier([ground_truth_parsable], [extracted])
+
+            return float(ret_score), extracted
+
+        except (Exception, TimeoutException):
+            return 0.0, None
 
 
 if __name__ == "__main__":
