@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from dataclasses import dataclass
+
 
 # All the different ways "Answer" is written in different languages.
 # Inlined from nemo_rl.evals.answer_parsing to avoid a cross-package import.
@@ -68,7 +68,7 @@ _ANSWER_COLON_PATTERN = re.compile(
 )
 
 
-def last_answer_colon_string(string: str) -> str:
+def _last_answer_colon_string(string: str) -> str:
     """Extract the content after the last multilingual "Answer:"-style marker.
 
     Searches for the last occurrence of any multilingual "Answer:" pattern
@@ -89,7 +89,7 @@ def last_answer_colon_string(string: str) -> str:
     return string[matches[-1].end():].strip()
 
 
-def last_boxed_only_string(string: str) -> str:
+def _last_boxed_string(string: str) -> str:
     """Extract the last LaTeX boxed expression from a string.
 
     Args:
@@ -117,3 +117,19 @@ def last_boxed_only_string(string: str) -> str:
         i += 1
 
     return string[idx + 7: right_brace_idx].strip() if right_brace_idx is not None else ""
+
+
+def extract_answer(string: str) -> str:
+    """Extract answer from model output text.
+
+    Tries \\boxed{} first, then multilingual ``Answer:`` as fallback.
+    Returns the extracted string or ``""`` if nothing is found.
+
+    Args:
+        string: Model output text.
+
+    Returns:
+        The extracted answer string.
+    """
+    extracted_answer = _last_boxed_string(string)
+    return extracted_answer if extracted_answer else _last_answer_colon_string(string)

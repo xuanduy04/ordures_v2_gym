@@ -1,17 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """
 Math With Judge Environment Resources Server.
 
@@ -52,10 +38,7 @@ from resources_servers.math_with_judge_original.app import (
 )
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 
-from resources_servers.math_with_judge.format_utils import (
-    last_answer_colon_string,
-    last_boxed_only_string,
-)
+from resources_servers.utils_qa.extract_answer import extract_answer
 from resources_servers.utils_outsource.judge_server_url_utils import (
     _build_chat_completions_payload,
     _extract_chat_completion_text,
@@ -186,9 +169,7 @@ class LibraryJudgeMathResourcesServer(_OriginalLibraryJudgeMathResourcesServer):
         """
         try:
             # try to manually parse the answer
-            extracted = last_boxed_only_string(generated_answer)
-            if not extracted:
-                extracted = last_answer_colon_string(generated_answer)
+            extracted = extract_answer(generated_answer)
 
             if not extracted:
                 # default to generated_answer

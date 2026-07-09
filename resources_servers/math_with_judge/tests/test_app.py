@@ -147,12 +147,13 @@ class TestLibraryVerifier:
         mock_client = MagicMock(spec=ServerClient)
         server = LibraryJudgeMathResourcesServer.model_construct(config=cfg, server_client=mock_client)
 
-        # No boxed and no answer_colon marker — extraction fails, returns 0
+        # No boxed and no answer_colon marker — extraction fails, falls back to
+        # generated_answer, which does not match expected.
         reward, extracted = server._verify_answer_with_library("\\boxed{12}", "3 * 4 = 13")
         assert reward == pytest.approx(0.0)
-        assert extracted is None
+        assert extracted == "3 * 4 = 13"
 
-        # Empty strings
+        # Empty strings — math_verify raises on empty box, caught by except path.
         reward, extracted = server._verify_answer_with_library("", "")
         assert reward == pytest.approx(0.0)
         assert extracted is None
