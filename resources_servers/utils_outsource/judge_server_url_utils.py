@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 import requests
 import urllib3
 from aiohttp import ClientTimeout
+from openai import BadRequestError
 
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import get_global_aiohttp_client
@@ -44,7 +45,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Shared constants (match base_llm_judge.py)
 # ---------------------------------------------------------------------------
 _RETRYABLE_STATUS_CODES: set[int] = {429, 500, 502, 503, 504}
-_MAX_RETRIES: int = 67
+_MAX_RETRIES: int = 3
 _WAIT_SECONDS_BEFORE_RETRY: float = 5
 _REQUEST_TIMEOUT_SECONDS: int = 600
 _MODELS_FETCH_MAX_ATTEMPTS: int = 6
@@ -223,10 +224,15 @@ def _validate_and_setup_judge_endpoint(
 # ---------------------------------------------------------------------------
 # Chat-completions POST with retry
 # ---------------------------------------------------------------------------
+_CONTEXT_LENGTH_ERROR_MESSAGE = (
+    "Please reduce the length of the input prompt or the number of requested output tokens"
+)
 async def _post_chat_completions(
     env_name: str,
     chat_completions_url: str,
     payload: dict[str, Any],
+    max_retries: int = _MAX_RETRIES,
+    raise_on_context_length_error: bool = False,
 ) -> dict[str, Any]:
     """POST a chat-completions request to the external judge with retry on
     429/5xx.
@@ -238,7 +244,7 @@ async def _post_chat_completions(
     timeout = ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
     headers = {"Content-Type": "application/json"}
     attempt = 0
-    while attempt < _MAX_RETRIES:
+    while attempt < max_retries:
         attempt += 1
         try:
             async with client.post(chat_completions_url, json=payload, headers=headers, timeout=timeout) as response:
@@ -258,6 +264,11 @@ async def _post_chat_completions(
                     )
                 return await response.json()
         except Exception as exc:
+            if _CONTEXT_LENGTH_ERROR_MESSAGE in str(exc):
+                # don't bother retrying, the hosted judge cannot handle it.
+                if raise_on_context_length_error:
+                    raise BadRequestError from exc
+                return {}
             print(
                 f"[WARNING] {env_name} at attempt={attempt}: judge request failed "
                 f"with error ({exc}); retrying in {_WAIT_SECONDS_BEFORE_RETRY} second(s)..."

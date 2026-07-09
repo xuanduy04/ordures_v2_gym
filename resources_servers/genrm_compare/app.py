@@ -41,6 +41,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import Field
 
+from openai import BadRequestError
+
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -211,16 +213,16 @@ class GenRMCompareResourcesServer(_OriginalGenRMCompareResourcesServer):
             max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
 
             for attempt_idx in range(max_attempts):
-                # Call the GenRM model via /v1/chat/completions (native vLLM)
                 payload = _build_chat_completions_payload(
                     cfg.genrm_responses_create_params, messages, cfg.genrm_model
                 )
-                response_json = await _post_chat_completions(
-                    "genrm_compare", self._genrm_chat_completions_url, payload
-                )
-                genrm_answer = _extract_chat_completion_text(response_json)
-
                 try:
+                    response_json = await _post_chat_completions(
+                        "genrm_compare", self._genrm_chat_completions_url, payload,
+                        max_retries=1, raise_on_context_length_error=True
+                    )
+                    genrm_answer = _extract_chat_completion_text(response_json)
+
                     score_1, score_2, ranking = parse_genrm_output(
                         genrm_answer,
                         cfg.default_score,
@@ -234,10 +236,16 @@ class GenRMCompareResourcesServer(_OriginalGenRMCompareResourcesServer):
                         await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
                         continue
 
-                    # Give up: fall back to defaults
                     logger.warning(
                         f"[GenRM] Parse failed for pair {pair_idx} after {max_attempts} attempts; "
                         f"falling back to defaults."
+                    )
+                    return cfg.default_score, cfg.default_score, cfg.default_ranking
+
+                except BadRequestError as e:
+                    logger.warning(
+                        f"[GenRM] BadRequestError for pair {pair_idx}; falling back to defaults. "
+                        f"Error: {e}"
                     )
                     return cfg.default_score, cfg.default_score, cfg.default_ranking
 
