@@ -1,0 +1,71 @@
+# ============================================================================
+# General QA Environment Configuration
+# ============================================================================
+# The LLM-judge is NOT managed by NeMo-Gym. The YAML MUST supply:
+#   - judge_server_url : host:port of an already-running `vllm serve` endpoint
+#                  (e.g. 0.0.0.0:8000). No default is provided.
+#   - judge_model: model name served at judge_server_url (validated against
+#                  /v1/models at startup and sent as `model` in the judge payload).
+#
+# The judge is queried via {judge_server_url}/v1/chat/completions (native vLLM),
+# NOT the Responses API. The judge is only invoked when should_use_judge=true
+# AND the deterministic verifiers give reward <= 0.5 (mixed-rewards strategy).
+#
+# Deterministic verification uses three verifiers (best score wins):
+#   - exact_match_verifier
+#   - math_verify_verifier
+#   - F1_verifier
+# ============================================================================
+
+general_qa:
+  resources_servers:
+    general_qa:
+      entrypoint: app.py
+      # MANDATED: externally-hosted LLM-judge endpoint (no default).
+      judge_server_url: ""
+      # MANDATED: model name served at judge_server_url (no default).
+      judge_model: ""
+      judge_responses_create_params: {
+        input: []
+      }
+      should_use_judge: false
+      domain: knowledge
+      verified: false
+      description: General QA dataset with extractive verifiers and LLM-as-a-judge
+      value: Improve general question answering capabilities
+general_qa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: general_qa
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/general_qa/data/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-general-qa
+          artifact_fpath: train.jsonl
+        gitlab_identifier:
+          dataset_name: general_qa
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/general_qa/data/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-knowledge-general-qa
+          artifact_fpath: validation.jsonl
+        gitlab_identifier:
+          dataset_name: general_qa
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/general_qa/data/example.jsonl
