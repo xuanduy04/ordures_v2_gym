@@ -55,7 +55,6 @@ from resources_servers.utils_qa.verify_answer import (
 
 
 class GeneralQARunRequest(BaseRunRequest):
-    question: str
     expected_answer: str
     should_use_judge: Optional[bool]
 
@@ -127,9 +126,9 @@ class GeneralQAResourcesServer(SimpleResourcesServer):
     # been customized for a specific judge model.
     JUDGE_SYSTEM_MESSAGE: ClassVar[
         str
-    ] = """Please act as an impartial judge and evaluate the equivalence of the solutions given by two AI assistants to the mathematical problem displayed below. You will be given AI assistant A's answer and AI assistant B's answer. Your job is to evaluate whether assistant A's answer is equivalent to assistant B's answer.
+    ] = """Please act as an impartial judge and evaluate the equivalence of the solutions given by two AI assistants to a problem displayed below. You will be given AI assistant A's answer and AI assistant B's answer. Your job is to evaluate whether assistant A's answer is equivalent to assistant B's answer.
 
-Consider the mathematical equivalence of the AI assistants' answers above all other considerations. If the problem requests special formatting instructions, you may disregard any formatting considerations when evaluating the answers -- consider only mathematical equivalence.
+Consider the equivalence of the AI assistants' answers above all other considerations. If the problem requests special formatting instructions, you may disregard any formatting considerations when evaluating the answers -- consider only semantic or mathematical equivalence.
 
 After evaluating both answers for equivalence, you must output only one of the following choices as your final verdict with a label:
 
@@ -139,7 +138,7 @@ After evaluating both answers for equivalence, you must output only one of the f
 Example output: "My final verdict is different [[A!=B]]"."""
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = (
-        "<|Problem|>\n{question}\n\n<|Start of Assistant A's Answer|>\n{first_answer}\n<|End of Assistant A's Answer|>\n\n<|Start of Assistant B's Answer|>\n{second_answer}\n<|End of Assistant B's Answer|>"
+        "<|Start of Assistant A's Answer|>\n{first_answer}\n<|End of Assistant A's Answer|>\n\n<|Start of Assistant B's Answer|>\n{second_answer}\n<|End of Assistant B's Answer|>"
     )
 
     JUDGE_EQUAL_LABEL: ClassVar[str] = "[[A=B]]"
@@ -185,7 +184,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             extracted_answer,
             deter_reward,
             judge_evaluations,
-        ) = await self._verify_answer(body.question, body.expected_answer, combined_response, body.should_use_judge)
+        ) = await self._verify_answer(body.expected_answer, combined_response, body.should_use_judge)
         
         return GeneralQAVerifyResponse(
             **body.model_dump(),
@@ -196,12 +195,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
         )
 
     async def _verify_answer(
-        self, question: str, expected_answer: str, generated_answer: str, should_use_judge: bool | None = None
+        self, expected_answer: str, generated_answer: str, should_use_judge: bool | None = None
     ) -> tuple[float, Optional[str], float, Optional[list[JudgeEvaluation]]]:
         """Verify the correctness of a generated answer.
 
         Verify the correctness of the specified model-generated answer to the
-        specified question in comparison with the specified expected answer.
+        in comparison with the specified expected answer.
         """
 
         deter_reward, extracted_answer = self._verify_answer_deterministically(expected_answer, generated_answer)
@@ -212,7 +211,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             return deter_reward, extracted_answer, deter_reward, None
 
         judge_answer = extracted_answer if extracted_answer else generated_answer
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, judge_answer)
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(expected_answer, judge_answer)
         return judge_reward, extracted_answer, deter_reward, judge_evaluations
 
     @classmethod
@@ -245,7 +244,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
             return 0.0, None
 
     async def _verify_answer_with_judge(
-        self, question: str, expected_answer: str, generated_answer: str
+        self, expected_answer: str, generated_answer: str
     ) -> tuple[float, list[JudgeEvaluation]]:
         # The judge is asked to evaluate whether the answers are equal using both
         # orders of the answers, in case there is any positional bias in terms of
@@ -253,14 +252,14 @@ Example output: "My final verdict is different [[A!=B]]"."""
         (
             first_order_equal,
             first_judge_evaluation,
-        ) = await self._generate_judge_evaluation(question, expected_answer, generated_answer)
+        ) = await self._generate_judge_evaluation(expected_answer, generated_answer)
         if not first_order_equal:
             return 0.0, [first_judge_evaluation]
 
         (
             second_order_equal,
             second_judge_evaluation,
-        ) = await self._generate_judge_evaluation(question, generated_answer, expected_answer)
+        ) = await self._generate_judge_evaluation(generated_answer, expected_answer)
         if second_order_equal:
             reward = 1.0
         else:
@@ -268,7 +267,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         return reward, [first_judge_evaluation, second_judge_evaluation]
 
     async def _generate_judge_evaluation(
-        self, question: str, first_answer: str, second_answer: str
+        self, first_answer: str, second_answer: str
     ) -> tuple[bool, JudgeEvaluation]:
         """Evaluate whether the two answers are equivalent using the externally-hosted LLM judge.
 
@@ -279,7 +278,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
         responses_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
 
         judge_prompt = self.JUDGE_PROMPT_TEMPLATE.format(
-            question=question, first_answer=first_answer, second_answer=second_answer
+            first_answer=first_answer, second_answer=second_answer
         )
         msgs: List[NeMoGymEasyInputMessage] = [
             NeMoGymEasyInputMessage(role="system", content=self.JUDGE_SYSTEM_MESSAGE),
